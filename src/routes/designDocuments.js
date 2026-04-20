@@ -9,10 +9,10 @@ router.use(authenticate);
 
 router.get('/', designDocumentController.getDesignDocuments);
 router.get('/:id', designDocumentController.getDesignDocumentById);
-router.post('/', uploadDesignDocument.single('file'), designDocumentController.createDesignDocument);
+router.post('/', roleCheck(['admin']), uploadDesignDocument.single('file'), designDocumentController.createDesignDocument);
 // More specific routes must come before generic :id routes
-router.put('/:id/status', designDocumentController.updateDesignDocumentStatus);
-router.put('/:id', uploadDesignDocument.single('file'), designDocumentController.updateDesignDocument);
+router.put('/:id/status', roleCheck(['admin']), designDocumentController.updateDesignDocumentStatus);
+router.put('/:id', roleCheck(['admin']), uploadDesignDocument.single('file'), designDocumentController.updateDesignDocument);
 router.delete('/:id', roleCheck(['admin']), designDocumentController.deleteDesignDocument);
 router.get('/:id/download', designDocumentController.downloadDesignDocument);
 

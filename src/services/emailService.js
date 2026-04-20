@@ -2,141 +2,201 @@ const nodemailer = require("nodemailer");
 const fs = require("fs").promises;
 const path = require("path");
 
-// Create transporter (configure with your email settings)
-const createTransporter = () => {
-  return nodemailer.createTransport({
-    host: process.env.SMTP_HOST || "smtp.gmail.com",
-    port: parseInt(process.env.SMTP_PORT || "587"),
-    secure: process.env.SMTP_SECURE === "true", // true for 465, false for other ports
+// Singleton transporter — created once, reused across calls
+let transporter = null;
+
+function getTransporter() {
+  if (transporter) return transporter;
+
+  transporter = nodemailer.createTransport({
+    host: process.env.EMAIL_HOST || "smtp.gmail.com",
+    port: parseInt(process.env.EMAIL_PORT || "587"),
+    secure: process.env.EMAIL_SECURE === "true",
     auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
+      user: process.env.EMAIL_USER,
+      pass: process.env.EMAIL_PASS,
+    },
+    pool: true,
+    maxConnections: 5,
+    socketTimeout: 10000,
+    tls: {
+      // Only allow self-signed certs in development.
+      // In production, proper TLS verification is enforced.
+      rejectUnauthorized: process.env.NODE_ENV === 'production',
     },
   });
-};
+
+  return transporter;
+}
 
 /**
- * Send proposal email to customer
+ * Verify SMTP connection — call on startup to catch misconfig early.
  */
-async function sendProposalEmail(
-  customerEmail,
-  customerName,
-  proposalNumber,
-  pdfPath
-) {
+async function verifyConnection() {
   try {
-    const transporter = createTransporter();
-
-    const mailOptions = {
-      from: `"Dekode IT" <${process.env.SMTP_USER}>`,
-      to: customerEmail,
-      subject: `Proposal ${proposalNumber} - Dekode IT`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #ea580c;">Dear ${customerName},</h2>
-          <p>Thank you for your interest in our services. Please find attached our proposal <strong>${proposalNumber}</strong> for your review.</p>
-          <p>We look forward to working with you.</p>
-          <p>Best regards,<br><strong>Dekode IT Team</strong></p>
-        </div>
-      `,
-      attachments: [
-        {
-          filename: `proposal_${proposalNumber}.pdf`,
-          path: pdfPath,
-        },
-      ],
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-    console.log("Proposal email sent:", info.messageId);
-    return { success: true, messageId: info.messageId };
+    await getTransporter().verify();
+    console.log("SMTP connection verified successfully.");
   } catch (error) {
-    console.error("Error sending proposal email:", error);
-    throw error;
+    console.error("SMTP connection failed:", error.message);
+    // Don't throw — app should still start, emails will fail gracefully
   }
 }
 
 /**
- * Send invoice email to customer
+ * Load an HTML email template and interpolate {{variable}} placeholders.
  */
-async function sendInvoiceEmail(
-  customerEmail,
-  customerName,
-  invoiceNumber,
-  pdfPath
-) {
+async function loadTemplate(templateName, variables = {}) {
+  const templatePath = path.join(
+    __dirname,
+    "..",
+    "emailTemplates",
+    `${templateName}.html`
+  );
+
+  let html;
   try {
-    const transporter = createTransporter();
+    html = await fs.readFile(templatePath, "utf8");
+  } catch (error) {
+    throw new Error(`Email template "${templateName}" not found at ${templatePath}`);
+  }
 
-    const mailOptions = {
-      from: `"Dekode IT" <${process.env.SMTP_USER}>`,
-      to: customerEmail,
-      subject: `Invoice ${invoiceNumber} - Dekode IT`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #ea580c;">Dear ${customerName},</h2>
-          <p>Please find attached invoice <strong>${invoiceNumber}</strong> for your review and payment.</p>
-          <p>Thank you for your business!</p>
-          <p>Best regards,<br><strong>Dekode IT Team</strong></p>
-        </div>
-      `,
-      attachments: [
-        {
-          filename: `invoice_${invoiceNumber}.pdf`,
-          path: pdfPath,
-        },
-      ],
-    };
+  // Replace all {{key}} occurrences — values are HTML-escaped to prevent injection
+  return html.replace(/\{\{(\w+)\}\}/g, (_, key) => {
+    const val = variables[key] ?? '';
+    return String(val)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  });
+}
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log("Invoice email sent:", info.messageId);
+/**
+ * Core email sender. All other functions delegate to this.
+ *
+ * @param {object} options
+ * @param {string|string[]} options.to         - Recipient(s)
+ * @param {string}          options.subject    - Email subject
+ * @param {string}          options.templateName - Template file name (no extension)
+ * @param {object}          [options.variables]  - Template interpolation map
+ * @param {object[]}        [options.attachments] - Nodemailer attachment objects
+ * @returns {Promise<{success: boolean, messageId: string}>}
+ */
+async function sendEmail({ to, subject, templateName, variables = {}, attachments = [] }) {
+  const html = await loadTemplate(templateName, variables);
+
+  const mailOptions = {
+    from: `"Dekode IT" <${process.env.EMAIL_FROM || process.env.EMAIL_USER}>`,
+    to,
+    subject,
+    html,
+    attachments,
+  };
+
+  try {
+    const info = await getTransporter().sendMail(mailOptions);
+    console.log(`[Email] Sent "${subject}" to ${to} — messageId: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
-    console.error("Error sending invoice email:", error);
+    console.error(`[Email] Failed to send "${subject}" to ${to}:`, error.message);
     throw error;
   }
 }
 
+// ---------------------------------------------------------------------------
+// Domain-specific helpers
+// ---------------------------------------------------------------------------
+
 /**
- * Send OTP email for password reset
+ * Send a proposal PDF to a customer.
+ */
+async function sendProposalEmail(customerEmail, customerName, proposalNumber, pdfPath) {
+  return sendEmail({
+    to: customerEmail,
+    subject: `Proposal ${proposalNumber} - Dekode IT`,
+    templateName: "proposal",
+    variables: { customerName, proposalNumber },
+    attachments: [
+      {
+        filename: `proposal_${proposalNumber}.pdf`,
+        path: pdfPath,
+      },
+    ],
+  });
+}
+
+/**
+ * Send an invoice PDF to a customer.
+ */
+async function sendInvoiceEmail(customerEmail, customerName, invoiceNumber, pdfPath) {
+  return sendEmail({
+    to: customerEmail,
+    subject: `Invoice ${invoiceNumber} - Dekode IT`,
+    templateName: "invoice",
+    variables: { customerName, invoiceNumber },
+    attachments: [
+      {
+        filename: `invoice_${invoiceNumber}.pdf`,
+        path: pdfPath,
+      },
+    ],
+  });
+}
+
+/**
+ * Send a one-time password for account/password reset flows.
  */
 async function sendOTPEmail(userEmail, userName, otp) {
-  try {
-    const transporter = createTransporter();
+  return sendEmail({
+    to: userEmail,
+    subject: "Password Reset OTP - Dekode IT",
+    templateName: "otp",
+    variables: {
+      userName: userName || "User",
+      otp,
+    },
+  });
+}
 
-    const mailOptions = {
-      from: `"Dekode IT" <${process.env.SMTP_USER}>`,
-      to: userEmail,
-      subject: "Password Reset OTP - Dekode IT",
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-          <div style="border-bottom: 3px solid #dc2626; padding-bottom: 20px; margin-bottom: 30px;">
-            <h1 style="color: #dc2626; margin: 0;">DEKODE IT</h1>
-          </div>
-          <h2 style="color: #333;">Password Reset Request</h2>
-          <p>Dear ${userName || "User"},</p>
-          <p>You have requested to reset your password. Please use the following OTP (One-Time Password) to verify your identity:</p>
-          <div style="background-color: #f3f4f6; border: 2px solid #dc2626; border-radius: 8px; padding: 20px; text-align: center; margin: 30px 0;">
-            <h1 style="color: #dc2626; font-size: 36px; letter-spacing: 8px; margin: 0; font-family: 'Courier New', monospace;">${otp}</h1>
-          </div>
-          <p style="color: #666; font-size: 14px;">This OTP will expire in 15 minutes. Please do not share this code with anyone.</p>
-          <p style="color: #666; font-size: 14px;">If you did not request this password reset, please ignore this email.</p>
-          <p style="margin-top: 30px;">Best regards,<br><strong>Dekode IT Team</strong></p>
-        </div>
-      `,
-    };
+/**
+ * Send a payment-due reminder for an outstanding invoice.
+ */
+async function sendInvoiceReminderEmail(customerEmail, customerName, invoiceNumber, dueDate, amount) {
+  return sendEmail({
+    to: customerEmail,
+    subject: `Payment Reminder - Invoice ${invoiceNumber} - Dekode IT`,
+    templateName: "invoiceReminder",
+    variables: { customerName, invoiceNumber, dueDate, amount },
+  });
+}
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log("OTP email sent:", info.messageId);
-    return { success: true, messageId: info.messageId };
-  } catch (error) {
-    console.error("Error sending OTP email:", error);
-    throw error;
-  }
+/**
+ * Send a project status follow-up to a customer.
+ */
+async function sendCustomerFollowupEmail(
+  customerEmail,
+  customerName,
+  projectName,
+  currentPhase,
+  status,
+  nextSteps,
+  customMessage = ""
+) {
+  return sendEmail({
+    to: customerEmail,
+    subject: `Project Update - ${projectName} - Dekode IT`,
+    templateName: "customerFollowup",
+    variables: { customerName, projectName, currentPhase, status, nextSteps, customMessage },
+  });
 }
 
 module.exports = {
+  verifyConnection,
+  sendEmail,
   sendProposalEmail,
   sendInvoiceEmail,
   sendOTPEmail,
+  sendInvoiceReminderEmail,
+  sendCustomerFollowupEmail,
 };

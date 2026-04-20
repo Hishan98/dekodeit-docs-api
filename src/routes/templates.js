@@ -1,11 +1,15 @@
 const express = require('express');
 const router = express.Router();
 const templateController = require('../controllers/templateController');
+const { importGoogleDoc } = require('../controllers/googleDocImportController');
 const authenticate = require('../middleware/auth');
 const roleCheck = require('../middleware/roleCheck');
 const { uploadTemplate } = require('../middleware/upload');
 
 router.use(authenticate);
+
+// Google Doc import (admin only)
+router.post('/import-google-doc', roleCheck(['admin']), importGoogleDoc);
 
 // Proposal Templates
 router.get('/proposals', templateController.getProposalTemplates);

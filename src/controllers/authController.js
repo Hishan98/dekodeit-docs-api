@@ -2,6 +2,8 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const pool = require("../config/database");
 const Joi = require("joi");
+const path = require("path");
+const fs = require("fs");
 const { sendOTPEmail } = require("../services/emailService");
 
 const loginSchema = Joi.object({
@@ -99,7 +101,7 @@ const login = async (req, res) => {
 const getMe = async (req, res) => {
   try {
     const [users] = await pool.execute(
-      "SELECT id, email, name, role, created_at FROM users WHERE id = ?",
+      "SELECT id, email, name, role, avatar_url, created_at FROM users WHERE id = ?",
       [req.user.id]
     );
 
@@ -160,7 +162,7 @@ const updateProfile = async (req, res) => {
     ]);
 
     const [users] = await pool.execute(
-      "SELECT id, email, name, role, created_at FROM users WHERE id = ?",
+      "SELECT id, email, name, role, avatar_url, created_at FROM users WHERE id = ?",
       [req.user.id]
     );
 
@@ -382,17 +384,13 @@ const verifyOTP = async (req, res) => {
 
     let otpRecord = otps[0];
 
-    // Check if OTP has expired - use proper date comparison
-    // MySQL TIMESTAMP is returned as a string in format "YYYY-MM-DD HH:MM:SS"
-    // Parse it correctly - MySQL TIMESTAMP is stored in UTC but returned as local time string
-    const expiresAtStr = String(otpRecord.expires_at);
-    // Convert MySQL TIMESTAMP string to Date object (treat as local time, not UTC)
-    // Format: "2024-01-15 10:30:00" -> parse as local time
-    const expiresAt = new Date(expiresAtStr.replace(" ", "T"));
+    // Check expiration — mysql2 returns TIMESTAMP columns as JS Date objects
+    // when using the promise pool, so a direct comparison is safe.
+    const expiresAt = otpRecord.expires_at instanceof Date
+      ? otpRecord.expires_at
+      : new Date(String(otpRecord.expires_at).replace(' ', 'T') + 'Z');
     const now = new Date();
 
-    // Check expiration - compare timestamps directly
-    // MySQL TIMESTAMP comparison should work correctly with this approach
     if (now.getTime() > expiresAt.getTime()) {
       await pool.execute(
         "UPDATE password_reset_otps SET verified = TRUE WHERE id = ?",
@@ -412,34 +410,28 @@ const verifyOTP = async (req, res) => {
         .json({ error: "Maximum attempts exceeded. Please request a new OTP" });
     }
 
-    // Verify OTP
+    // Verify OTP — atomically increment attempts only when OTP is wrong,
+    // and invalidate in the same statement if max is reached.
     if (otpRecord.otp !== otp) {
-      // Increment attempts
+      // Single atomic UPDATE: increment attempts and invalidate if at limit
       await pool.execute(
-        "UPDATE password_reset_otps SET attempts = attempts + 1 WHERE id = ?",
+        `UPDATE password_reset_otps
+         SET attempts = attempts + 1,
+             verified = IF(attempts + 1 >= max_attempts, TRUE, verified)
+         WHERE id = ?`,
         [otpRecord.id]
       );
 
-      // Refetch the OTP record to get updated attempts count
-      // This ensures we have the latest data for subsequent attempts
-      const [updatedOtps] = await pool.execute(
-        "SELECT id, email, otp, attempts, max_attempts, expires_at, verified FROM password_reset_otps WHERE id = ?",
+      // Refetch to get the authoritative post-increment state
+      const [[updated]] = await pool.execute(
+        "SELECT attempts, max_attempts FROM password_reset_otps WHERE id = ?",
         [otpRecord.id]
       );
 
-      if (updatedOtps.length > 0) {
-        otpRecord = updatedOtps[0];
-
-        // Check if max attempts exceeded after increment
-        if (otpRecord.attempts >= otpRecord.max_attempts) {
-          await pool.execute(
-            "UPDATE password_reset_otps SET verified = TRUE WHERE id = ?",
-            [otpRecord.id]
-          );
-          return res.status(401).json({
-            error: "Maximum attempts exceeded. Please request a new OTP",
-          });
-        }
+      if (updated && updated.attempts >= updated.max_attempts) {
+        return res.status(401).json({
+          error: "Maximum attempts exceeded. Please request a new OTP",
+        });
       }
 
       return res.status(401).json({ error: "Invalid OTP" });
@@ -615,9 +607,7 @@ const resetPassword = async (req, res) => {
     const expiresAt = new Date(otpRecord.expires_at);
     const now = new Date();
 
-    // Check if expired (MySQL timestamps are in UTC, so we compare directly)
-    // Add a 2-minute buffer to account for server time differences and processing delays
-    const expirationBuffer = 2 * 60 * 1000; // 2 minutes in milliseconds
+    const expirationBuffer = 30 * 1000; // 30-second clock-skew tolerance
     if (now.getTime() > expiresAt.getTime() + expirationBuffer) {
       // Delete expired OTP
       await pool.execute("DELETE FROM password_reset_otps WHERE id = ?", [
@@ -659,11 +649,63 @@ const resetPassword = async (req, res) => {
   }
 };
 
+/**
+ * POST /api/auth/avatar
+ * Upload or update the current user's profile picture.
+ * Expects multipart/form-data with field name "avatar".
+ * Returns the updated user object including the new avatar_url.
+ */
+const uploadAvatar = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const userId = req.user.id;
+    const avatarUrl = `/uploads/avatars/${req.file.filename}`;
+
+    // Delete previous avatar file if it exists
+    const [existing] = await pool.execute(
+      "SELECT avatar_url FROM users WHERE id = ?",
+      [userId]
+    );
+
+    if (existing.length > 0 && existing[0].avatar_url) {
+      const oldPath = path.join(
+        __dirname,
+        "..",
+        "..",
+        existing[0].avatar_url.replace(/^\//, "")
+      );
+      if (fs.existsSync(oldPath)) {
+        fs.unlinkSync(oldPath);
+      }
+    }
+
+    // Persist new avatar path
+    await pool.execute("UPDATE users SET avatar_url = ? WHERE id = ?", [
+      avatarUrl,
+      userId,
+    ]);
+
+    const [users] = await pool.execute(
+      "SELECT id, email, name, role, avatar_url, created_at FROM users WHERE id = ?",
+      [userId]
+    );
+
+    res.json({ user: users[0], message: "Avatar updated successfully" });
+  } catch (error) {
+    console.error("Upload avatar error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
 module.exports = {
   login,
   getMe,
   updateProfile,
   changePassword,
+  uploadAvatar,
   forgotPassword,
   verifyOTP,
   resetPassword,

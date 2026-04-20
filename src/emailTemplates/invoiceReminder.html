@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Invoice Payment Reminder</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; }
+        .header { color: #dc2626; }
+        .urgent { background-color: #fef2f2; border-left: 4px solid #dc2626; padding: 15px; margin: 20px 0; }
+        .footer { margin-top: 30px; }
+    </style>
+</head>
+<body>
+    <h2 class="header">Payment Reminder - Invoice {{invoiceNumber}}</h2>
+    <p>Dear {{customerName}},</p>
+    <div class="urgent">
+        <p><strong>Urgent:</strong> This is a friendly reminder that invoice <strong>{{invoiceNumber}}</strong> is due for payment.</p>
+        <p><strong>Due Date:</strong> {{dueDate}}</p>
+        <p><strong>Amount Due:</strong> {{amount}}</p>
+    </div>
+    <p>Please arrange payment at your earliest convenience to avoid any service interruptions.</p>
+    <p>If you have already made the payment, please disregard this reminder.</p>
+    <div class="footer">
+        <p>Best regards,<br><strong>Dekode IT Team</strong></p>
+    </div>
+</body>
+</html>

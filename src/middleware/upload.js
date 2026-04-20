@@ -7,6 +7,7 @@ const uploadDirs = {
   templates: path.join(__dirname, '../../uploads/templates'),
   designDocuments: path.join(__dirname, '../../uploads/design-documents'),
   pdfs: path.join(__dirname, '../../uploads/pdfs'),
+  purchaseOrders: path.join(__dirname, '../../uploads/purchase-orders'),
 };
 
 Object.values(uploadDirs).forEach(dir => {
@@ -36,6 +37,28 @@ const designDocumentStorage = multer.diskStorage({
     cb(null, `design-doc-${uniqueSuffix}${path.extname(file.originalname)}`);
   }
 });
+
+// Storage configuration for purchase order documents (PDF, doc, docx, images)
+const purchaseOrderStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDirs.purchaseOrders);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, `po-${uniqueSuffix}${path.extname(file.originalname)}`);
+  }
+});
+
+// File filter for purchase orders (PDF, doc, docx, images)
+const poFilter = (req, file, cb) => {
+  const allowedExts = ['.pdf', '.docx', '.doc', '.jpg', '.jpeg', '.png'];
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (allowedExts.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only PDF, Word documents, and images are allowed'), false);
+  }
+};
 
 // File filter for .docx files
 const docxFilter = (req, file, cb) => {
@@ -70,9 +93,16 @@ const uploadDesignDocument = multer({
   }
 });
 
+const uploadPurchaseOrder = multer({
+  storage: purchaseOrderStorage,
+  fileFilter: poFilter,
+  limits: { fileSize: 10 * 1024 * 1024 }
+});
+
 module.exports = {
   uploadTemplate,
   uploadDesignDocument,
+  uploadPurchaseOrder,
   uploadDirs,
 };
 

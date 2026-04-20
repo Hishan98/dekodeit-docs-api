@@ -1,10 +1,12 @@
 const pool = require("../config/database");
 const Joi = require("joi");
+const path = require("path");
+const fs = require("fs");
 
 const projectSchema = Joi.object({
   name: Joi.string().required(),
   description: Joi.string().allow("", null),
-  customer_id: Joi.number().integer().required(),
+  client_id: Joi.number().integer().required(),
   service_id: Joi.number().integer().allow(null),
   phase: Joi.string()
     .valid(
@@ -46,10 +48,12 @@ const projectSchema = Joi.object({
 const getProjects = async (req, res) => {
   try {
     const [projects] = await pool.execute(
-      `SELECT p.*, c.name as customer_name, c.email as customer_email,
+      `SELECT p.*, cl.company_name AS client_name,
+       cc.name AS contact_name, cc.email AS contact_email,
        s.name as service_name
        FROM projects p
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
        LEFT JOIN services s ON p.service_id = s.id
        ORDER BY p.created_at DESC`
     );
@@ -112,10 +116,12 @@ const getProjectById = async (req, res) => {
     const { id } = req.params;
 
     const [projects] = await pool.execute(
-      `SELECT p.*, c.name as customer_name, c.email as customer_email,
+      `SELECT p.*, cl.company_name AS client_name,
+       cc.name AS contact_name, cc.email AS contact_email,
        s.name as service_name
        FROM projects p
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
        LEFT JOIN services s ON p.service_id = s.id
        WHERE p.id = ?`,
       [id]
@@ -143,28 +149,49 @@ const getProjectById = async (req, res) => {
       [id]
     );
 
+    // Get linked service agreements
+    const [serviceAgreements] = await pool.execute(
+      `SELECT id, agreement_number, subject, status, pdf_path, created_at
+       FROM service_agreements
+       WHERE project_id = ?
+       ORDER BY created_at DESC`,
+      [id]
+    );
+
+    // Get linked design documents
+    const [designDocuments] = await pool.execute(
+      `SELECT id, document_number, subject, status, file_path, notes, created_at
+       FROM design_documents
+       WHERE project_id = ?
+       ORDER BY created_at DESC`,
+      [id]
+    );
+
     // Get payments
     const [payments] = await pool.execute(
       `SELECT * FROM payments WHERE project_id = ? ORDER BY payment_date DESC`,
       [id]
     );
 
-    // Calculate payment totals
-    const totalPaid = payments.reduce(
-      (sum, p) => sum + parseFloat(p.amount),
-      0
-    );
+    // Calculate payment totals.
+    // broker_commission and developer_payment are outgoing costs — they must NOT
+    // count toward the customer-paid total or reduce the project balance.
     const brokerPayments = payments
-      .filter((p) => p.payment_type === "broker_commission")
+      .filter((p) => p.payment_type === 'broker_commission')
       .reduce((sum, p) => sum + parseFloat(p.amount), 0);
     const developerPayments = payments
-      .filter((p) => p.payment_type === "developer_payment")
+      .filter((p) => p.payment_type === 'developer_payment')
+      .reduce((sum, p) => sum + parseFloat(p.amount), 0);
+    const totalPaid = payments
+      .filter((p) => p.payment_type !== 'broker_commission' && p.payment_type !== 'developer_payment')
       .reduce((sum, p) => sum + parseFloat(p.amount), 0);
 
     res.json({
       project: projects[0],
       proposals,
       invoices,
+      service_agreements: serviceAgreements,
+      design_documents: designDocuments,
       payments,
       payment_summary: {
         total_amount: parseFloat(projects[0].total_amount),
@@ -238,12 +265,12 @@ const createProject = async (req, res) => {
     }
 
     const [result] = await pool.execute(
-      `INSERT INTO projects (name, description, customer_id, service_id, phase, total_amount, status, start_date, end_date, has_recurring_billing, free_support_period_months, created_by)
+      `INSERT INTO projects (name, description, client_id, service_id, phase, total_amount, status, start_date, end_date, has_recurring_billing, free_support_period_months, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         value.name,
         value.description || null,
-        value.customer_id,
+        value.client_id,
         value.service_id || null,
         value.phase,
         value.total_amount,
@@ -336,13 +363,13 @@ const updateProject = async (req, res) => {
 
     await pool.execute(
       `UPDATE projects 
-       SET name = ?, description = ?, customer_id = ?, service_id = ?, phase = ?,
+       SET name = ?, description = ?, client_id = ?, service_id = ?, phase = ?,
        total_amount = ?, status = ?, start_date = ?, end_date = ?, has_recurring_billing = ?, free_support_period_months = ?
        WHERE id = ?`,
       [
         value.name,
         value.description || null,
-        value.customer_id,
+        value.client_id,
         value.service_id || null,
         value.phase,
         value.total_amount,
@@ -501,33 +528,92 @@ const deleteProject = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Check if project has associated invoices or proposals
+    // Verify project exists first
+    const [[project]] = await pool.execute(
+      "SELECT id FROM projects WHERE id = ?", [id]
+    );
+    if (!project) return res.status(404).json({ error: "Project not found" });
+
+    // Check all tables that reference project_id with RESTRICT / hard dependency
     const [invoices] = await pool.execute(
-      "SELECT id FROM invoices WHERE project_id = ? LIMIT 1",
-      [id]
+      "SELECT id FROM invoices WHERE project_id = ? LIMIT 1", [id]
     );
     const [proposals] = await pool.execute(
-      "SELECT id FROM proposals WHERE project_id = ? LIMIT 1",
-      [id]
+      "SELECT id FROM proposals WHERE project_id = ? LIMIT 1", [id]
+    );
+    const [recurringBills] = await pool.execute(
+      "SELECT id FROM recurring_bills WHERE project_id = ? LIMIT 1", [id]
+    );
+    const [payments] = await pool.execute(
+      "SELECT id FROM payments WHERE project_id = ? LIMIT 1", [id]
     );
 
-    if (invoices.length > 0 || proposals.length > 0) {
-      return res.status(400).json({
-        error: "Cannot delete project with associated invoices or proposals",
+    const blocked = [];
+    if (invoices.length)       blocked.push("invoices");
+    if (proposals.length)      blocked.push("proposals");
+    if (recurringBills.length) blocked.push("recurring bills");
+    if (payments.length)       blocked.push("payments");
+
+    if (blocked.length > 0) {
+      return res.status(409).json({
+        error: `Cannot delete project — it has linked ${blocked.join(", ")}. Remove or reassign them first.`,
+        blocked,
       });
     }
 
-    const [result] = await pool.execute("DELETE FROM projects WHERE id = ?", [
-      id,
-    ]);
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ error: "Project not found" });
-    }
-
+    await pool.execute("DELETE FROM projects WHERE id = ?", [id]);
     res.json({ message: "Project deleted successfully" });
   } catch (error) {
     console.error("Delete project error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+const uploadPurchaseOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [[project]] = await pool.execute("SELECT id FROM projects WHERE id = ?", [id]);
+    if (!project) return res.status(404).json({ error: "Project not found" });
+
+    if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    const filePath = `/uploads/purchase-orders/${req.file.filename}`;
+
+    await pool.execute(
+      "UPDATE projects SET purchase_order_url = ?, purchase_order_received_at = NOW() WHERE id = ?",
+      [filePath, id]
+    );
+
+    const [[updated]] = await pool.execute("SELECT * FROM projects WHERE id = ?", [id]);
+    res.json({ project: updated, message: "Purchase order uploaded successfully" });
+  } catch (error) {
+    console.error("Upload purchase order error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+const removePurchaseOrder = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [[project]] = await pool.execute(
+      "SELECT purchase_order_url FROM projects WHERE id = ?", [id]
+    );
+    if (!project) return res.status(404).json({ error: "Project not found" });
+
+    // Delete file from disk if it exists
+    if (project.purchase_order_url) {
+      const filePath = path.join(__dirname, "../../", project.purchase_order_url);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+
+    await pool.execute(
+      "UPDATE projects SET purchase_order_url = NULL, purchase_order_received_at = NULL WHERE id = ?",
+      [id]
+    );
+
+    res.json({ message: "Purchase order removed successfully" });
+  } catch (error) {
+    console.error("Remove purchase order error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -539,4 +625,6 @@ module.exports = {
   updateProject,
   updateProjectPhase,
   deleteProject,
+  uploadPurchaseOrder,
+  removePurchaseOrder,
 };

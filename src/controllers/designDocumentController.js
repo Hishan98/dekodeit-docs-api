@@ -53,11 +53,11 @@ const designDocumentSchema = Joi.object({
 const getDesignDocuments = async (req, res) => {
   try {
     const [documents] = await pool.execute(
-      `SELECT dd.*, p.name as project_name, p.customer_id,
-       c.name as customer_name
+      `SELECT dd.*, p.name as project_name, p.client_id,
+       cl.company_name as client_name
        FROM design_documents dd
        LEFT JOIN projects p ON dd.project_id = p.id
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
        ORDER BY dd.created_at DESC`
     );
     res.json({ documents });
@@ -103,11 +103,11 @@ const getDesignDocumentById = async (req, res) => {
     const { id } = req.params;
 
     const [documents] = await pool.execute(
-      `SELECT dd.*, p.name as project_name, p.customer_id,
-       c.name as customer_name
+      `SELECT dd.*, p.name as project_name, p.client_id,
+       cl.company_name as client_name
        FROM design_documents dd
        LEFT JOIN projects p ON dd.project_id = p.id
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
        WHERE dd.id = ?`,
       [id]
     );

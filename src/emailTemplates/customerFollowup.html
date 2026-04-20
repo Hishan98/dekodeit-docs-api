@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Customer Follow-up</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; }
+        .header { color: #059669; }
+        .project-info { background-color: #f0fdf4; border-left: 4px solid #059669; padding: 15px; margin: 20px 0; }
+        .footer { margin-top: 30px; }
+    </style>
+</head>
+<body>
+    <h2 class="header">Project Update - {{projectName}}</h2>
+    <p>Dear {{customerName}},</p>
+    <p>We hope this email finds you well. We're writing to provide an update on your project.</p>
+    <div class="project-info">
+        <p><strong>Project:</strong> {{projectName}}</p>
+        <p><strong>Current Phase:</strong> {{currentPhase}}</p>
+        <p><strong>Status:</strong> {{status}}</p>
+        <p><strong>Next Steps:</strong> {{nextSteps}}</p>
+    </div>
+    <p>{{customMessage}}</p>
+    <p>If you have any questions or need further information, please don't hesitate to contact us.</p>
+    <div class="footer">
+        <p>Best regards,<br><strong>Dekode IT Team</strong></p>
+    </div>
+</body>
+</html>

@@ -5,18 +5,26 @@ const path = require('path');
 /**
  * Generate PDF from HTML content
  */
+const PDF_TIMEOUT_MS = parseInt(process.env.PDF_TIMEOUT_MS || '30000', 10); // 30s default
+
 async function generatePDF(htmlContent, outputPath) {
   let browser;
+  const timeoutHandle = setTimeout(() => {
+    if (browser) browser.close().catch(() => {});
+  }, PDF_TIMEOUT_MS);
+
   try {
     browser = await puppeteer.launch({
       headless: true,
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      timeout: PDF_TIMEOUT_MS,
     });
 
     const page = await browser.newPage();
-    await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
+    page.setDefaultTimeout(PDF_TIMEOUT_MS);
 
-    // Ensure directory exists
+    await page.setContent(htmlContent, { waitUntil: 'networkidle0', timeout: PDF_TIMEOUT_MS });
+
     const dir = path.dirname(outputPath);
     await fs.mkdir(dir, { recursive: true });
 
@@ -24,38 +32,42 @@ async function generatePDF(htmlContent, outputPath) {
       path: outputPath,
       format: 'A4',
       printBackground: true,
-      margin: {
-        top: '20mm',
-        right: '15mm',
-        bottom: '20mm',
-        left: '15mm',
-      },
+      margin: { top: '20mm', right: '15mm', bottom: '20mm', left: '15mm' },
     });
 
+    clearTimeout(timeoutHandle);
     await browser.close();
     return outputPath;
   } catch (error) {
-    if (browser) {
-      await browser.close();
-    }
+    clearTimeout(timeoutHandle);
+    if (browser) await browser.close().catch(() => {});
     console.error('PDF generation error:', error);
     throw error;
   }
 }
 
 /**
- * Replace template variables in HTML
+ * Escape a string for safe insertion into HTML.
+ * Prevents XSS / HTML injection from user-supplied data (names, addresses, etc.)
+ */
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/**
+ * Replace template variables in HTML.
+ * All variable values are HTML-escaped before substitution.
  */
 function replaceTemplateVariables(html, variables) {
-  let processedHtml = html;
-  
-  // Replace all {{variable}} with actual values
-  Object.keys(variables).forEach(key => {
-    const regex = new RegExp(`\\{\\{${key}\\}\\}`, 'g');
-    processedHtml = processedHtml.replace(regex, variables[key] || '');
+  return html.replace(/\{\{([\w.]+)\}\}/g, (_, key) => {
+    return escapeHtml(variables[key]);
   });
-
-  return processedHtml;
 }
 
 module.exports = {

@@ -2,10 +2,13 @@ const pool = require('../config/database');
 const Joi = require('joi');
 const { generateInvoiceNumber } = require('../services/numberingService');
 const { generatePDF, replaceTemplateVariables } = require('../services/pdfService');
+const { loadTemplateFile } = require('../services/templateFileService');
+const { sendInvoiceEmail } = require('../services/emailService');
 const path = require('path');
+const { PDF_DIR } = require('../config/paths');
 
 const invoiceSchema = Joi.object({
-  customer_id: Joi.number().integer().required(),
+  client_id: Joi.number().integer().required(),
   project_id: Joi.number().integer().allow(null),
   proposal_id: Joi.number().integer().allow(null),
   template_id: Joi.number().integer().required(),
@@ -29,10 +32,10 @@ const invoiceSchema = Joi.object({
 const getInvoices = async (req, res) => {
   try {
     const [invoices] = await pool.execute(
-      `SELECT i.*, c.name as customer_name, c.email as customer_email,
+      `SELECT i.*, cl.company_name AS client_name,
        it.name as template_name, p.name as project_name
        FROM invoices i
-       LEFT JOIN customers c ON i.customer_id = c.id
+       LEFT JOIN clients cl ON i.client_id = cl.id
        LEFT JOIN invoice_templates it ON i.template_id = it.id
        LEFT JOIN projects p ON i.project_id = p.id
        ORDER BY i.created_at DESC`
@@ -49,11 +52,14 @@ const getInvoiceById = async (req, res) => {
     const { id } = req.params;
 
     const [invoices] = await pool.execute(
-      `SELECT i.*, c.name as customer_name, c.email as customer_email, c.phone as customer_phone,
-       c.company as customer_company, c.address as customer_address, c.vat_id as customer_vat_id,
+      `SELECT i.*,
+       cl.company_name AS client_name, cl.address AS client_address, cl.vat_id AS client_vat_id,
+       cc.name AS contact_name, cc.email AS contact_email,
+       cc.phone AS contact_phone, cc.job_title AS contact_job_title,
        it.name as template_name, p.name as project_name
        FROM invoices i
-       LEFT JOIN customers c ON i.customer_id = c.id
+       LEFT JOIN clients cl ON i.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
        LEFT JOIN invoice_templates it ON i.template_id = it.id
        LEFT JOIN projects p ON i.project_id = p.id
        WHERE i.id = ?`,
@@ -64,13 +70,11 @@ const getInvoiceById = async (req, res) => {
       return res.status(404).json({ error: 'Invoice not found' });
     }
 
-    // Get line items
     const [lineItems] = await pool.execute(
       'SELECT * FROM invoice_line_items WHERE invoice_id = ?',
       [id]
     );
 
-    // Get payments
     const [payments] = await pool.execute(
       'SELECT * FROM payments WHERE invoice_id = ? ORDER BY payment_date DESC',
       [id]
@@ -88,50 +92,48 @@ const getInvoiceById = async (req, res) => {
 };
 
 const createInvoice = async (req, res) => {
+  const conn = await pool.getConnection();
   try {
     const { error, value } = invoiceSchema.validate(req.body);
     if (error) {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    // Generate invoice number
-    const invoiceNumber = await generateInvoiceNumber();
-
-    // Get template
-    const [templates] = await pool.execute(
-      'SELECT * FROM invoice_templates WHERE id = ?',
+    const [[template]] = await conn.execute(
+      'SELECT id, file_path FROM invoice_templates WHERE id = ?',
       [value.template_id]
     );
+    if (!template) return res.status(404).json({ error: 'Template not found' });
 
-    if (templates.length === 0) {
-      return res.status(404).json({ error: 'Template not found' });
-    }
-
-    // Get customer
-    const [customers] = await pool.execute(
-      'SELECT * FROM customers WHERE id = ?',
-      [value.customer_id]
+    const [[client]] = await conn.execute(
+      `SELECT cl.*, cc.name AS contact_name, cc.email AS contact_email,
+              cc.phone AS contact_phone, cc.job_title AS contact_job_title
+       FROM clients cl
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
+       WHERE cl.id = ?`,
+      [value.client_id]
     );
+    if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    if (customers.length === 0) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
-
-    const customer = customers[0];
-    const template = templates[0];
-
-    // Calculate final amount
+    const invoiceNumber = await generateInvoiceNumber();
     const finalAmount = value.total_amount + value.tax_amount - value.discount_amount;
 
-    // Prepare variables for template replacement
     const variables = {
       'invoice_number': invoiceNumber,
-      'customer.name': customer.name,
-      'customer.email': customer.email || '',
-      'customer.phone': customer.phone || '',
-      'customer.company': customer.company || '',
-      'customer.address': customer.address || '',
-      'customer.vat_id': customer.vat_id || '',
+      'client.company_name': client.company_name,
+      'client.address': client.address || '',
+      'client.vat_id': client.vat_id || '',
+      'contact.name': client.contact_name || '',
+      'contact.email': client.contact_email || '',
+      'contact.phone': client.contact_phone || '',
+      'contact.job_title': client.contact_job_title || '',
+      // Legacy aliases
+      'customer.name': client.contact_name || client.company_name,
+      'customer.email': client.contact_email || '',
+      'customer.phone': client.contact_phone || '',
+      'customer.company': client.company_name,
+      'customer.address': client.address || '',
+      'customer.vat_id': client.vat_id || '',
       'invoice.total_amount': value.total_amount.toFixed(2),
       'invoice.tax_amount': value.tax_amount.toFixed(2),
       'invoice.discount_amount': value.discount_amount.toFixed(2),
@@ -142,71 +144,55 @@ const createInvoice = async (req, res) => {
       'date': new Date().toLocaleDateString(),
     };
 
-    // Replace template variables
-    let htmlContent = replaceTemplateVariables(template.html_content, variables);
+    // Load template from file and merge variables
+    const rawHtml = await loadTemplateFile(template.file_path);
+    const htmlContent = replaceTemplateVariables(rawHtml, variables);
 
-    // Insert invoice
-    const [result] = await pool.execute(
-      `INSERT INTO invoices (invoice_number, customer_id, project_id, proposal_id, template_id, subject,
-       total_amount, currency, tax_amount, discount_amount, final_amount, due_date, status, html_content, notes, created_by)
+    await conn.beginTransaction();
+
+    const [result] = await conn.execute(
+      `INSERT INTO invoices (invoice_number, client_id, project_id, proposal_id, template_id, subject,
+       total_amount, currency, tax_amount, discount_amount, final_amount, due_date, status, notes, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        invoiceNumber,
-        value.customer_id,
-        value.project_id || null,
-        value.proposal_id || null,
-        value.template_id,
-        value.subject || null,
-        value.total_amount,
-        value.currency,
-        value.tax_amount,
-        value.discount_amount,
-        finalAmount,
-        value.due_date || null,
-        value.status,
-        htmlContent,
-        value.notes || null,
-        req.user.id,
+        invoiceNumber, value.client_id, value.project_id || null, value.proposal_id || null,
+        value.template_id, value.subject || null, value.total_amount, value.currency,
+        value.tax_amount, value.discount_amount, finalAmount,
+        value.due_date || null, value.status, value.notes || null, req.user.id,
       ]
     );
 
     const invoiceId = result.insertId;
 
-    // Insert line items
     if (value.line_items && value.line_items.length > 0) {
       for (const item of value.line_items) {
-        const totalPrice = item.quantity * item.unit_price;
-        await pool.execute(
+        await conn.execute(
           `INSERT INTO invoice_line_items (invoice_id, description, quantity, unit_price, total_price)
            VALUES (?, ?, ?, ?, ?)`,
-          [invoiceId, item.description, item.quantity, item.unit_price, totalPrice]
+          [invoiceId, item.description, item.quantity, item.unit_price, item.quantity * item.unit_price]
         );
       }
     }
 
-    // Generate PDF
-    const pdfPath = path.join(__dirname, '../../uploads/pdfs', `invoice_${invoiceId}.pdf`);
+    await conn.commit();
+
+    const pdfPath = path.join(PDF_DIR, `invoice_${invoiceId}.pdf`);
     await generatePDF(htmlContent, pdfPath);
+    await pool.execute('UPDATE invoices SET pdf_path = ? WHERE id = ?', [pdfPath, invoiceId]);
 
-    // Update invoice with PDF path
-    await pool.execute(
-      'UPDATE invoices SET pdf_path = ? WHERE id = ?',
-      [pdfPath, invoiceId]
-    );
-
-    const [invoices] = await pool.execute(
-      'SELECT * FROM invoices WHERE id = ?',
-      [invoiceId]
-    );
-
-    res.status(201).json({ invoice: invoices[0] });
+    const [[invoice]] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [invoiceId]);
+    res.status(201).json({ invoice });
   } catch (error) {
+    await conn.rollback();
     console.error('Create invoice error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    conn.release();
   }
 };
 
 const updateInvoice = async (req, res) => {
+  const conn = await pool.getConnection();
   try {
     const { id } = req.params;
     const { error, value } = invoiceSchema.validate(req.body);
@@ -214,45 +200,41 @@ const updateInvoice = async (req, res) => {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    // Get existing invoice
-    const [existing] = await pool.execute(
-      'SELECT * FROM invoices WHERE id = ?',
-      [id]
-    );
+    const [[existing]] = await conn.execute('SELECT * FROM invoices WHERE id = ?', [id]);
+    if (!existing) return res.status(404).json({ error: 'Invoice not found' });
 
-    if (existing.length === 0) {
-      return res.status(404).json({ error: 'Invoice not found' });
-    }
-
-    // Get template and customer for HTML regeneration
-    const [templates] = await pool.execute(
-      'SELECT * FROM invoice_templates WHERE id = ?',
+    const [[template]] = await conn.execute(
+      'SELECT id, file_path FROM invoice_templates WHERE id = ?',
       [value.template_id]
     );
-    const [customers] = await pool.execute(
-      'SELECT * FROM customers WHERE id = ?',
-      [value.customer_id]
+    const [[client]] = await conn.execute(
+      `SELECT cl.*, cc.name AS contact_name, cc.email AS contact_email,
+              cc.phone AS contact_phone, cc.job_title AS contact_job_title
+       FROM clients cl
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
+       WHERE cl.id = ?`,
+      [value.client_id]
     );
+    if (!template || !client) return res.status(404).json({ error: 'Template or client not found' });
 
-    if (templates.length === 0 || customers.length === 0) {
-      return res.status(404).json({ error: 'Template or customer not found' });
-    }
-
-    const customer = customers[0];
-    const template = templates[0];
-
-    // Calculate final amount
     const finalAmount = value.total_amount + value.tax_amount - value.discount_amount;
 
-    // Prepare variables
     const variables = {
-      'invoice_number': existing[0].invoice_number,
-      'customer.name': customer.name,
-      'customer.email': customer.email || '',
-      'customer.phone': customer.phone || '',
-      'customer.company': customer.company || '',
-      'customer.address': customer.address || '',
-      'customer.vat_id': customer.vat_id || '',
+      'invoice_number': existing.invoice_number,
+      'client.company_name': client.company_name,
+      'client.address': client.address || '',
+      'client.vat_id': client.vat_id || '',
+      'contact.name': client.contact_name || '',
+      'contact.email': client.contact_email || '',
+      'contact.phone': client.contact_phone || '',
+      'contact.job_title': client.contact_job_title || '',
+      // Legacy aliases
+      'customer.name': client.contact_name || client.company_name,
+      'customer.email': client.contact_email || '',
+      'customer.phone': client.contact_phone || '',
+      'customer.company': client.company_name,
+      'customer.address': client.address || '',
+      'customer.vat_id': client.vat_id || '',
       'invoice.total_amount': value.total_amount.toFixed(2),
       'invoice.tax_amount': value.tax_amount.toFixed(2),
       'invoice.discount_amount': value.discount_amount.toFixed(2),
@@ -263,57 +245,50 @@ const updateInvoice = async (req, res) => {
       'date': new Date().toLocaleDateString(),
     };
 
-    let htmlContent = replaceTemplateVariables(template.html_content, variables);
+    const rawHtml = await loadTemplateFile(template.file_path);
+    const htmlContent = replaceTemplateVariables(rawHtml, variables);
 
-    // Update invoice
-    await pool.execute(
-      `UPDATE invoices 
-       SET customer_id = ?, project_id = ?, proposal_id = ?, template_id = ?, subject = ?,
-       total_amount = ?, currency = ?, tax_amount = ?, discount_amount = ?, final_amount = ?,
-       due_date = ?, status = ?, html_content = ?, notes = ?
+    await conn.beginTransaction();
+
+    await conn.execute(
+      `UPDATE invoices
+       SET client_id = ?, project_id = ?, proposal_id = ?, template_id = ?, subject = ?,
+           total_amount = ?, currency = ?, tax_amount = ?, discount_amount = ?, final_amount = ?,
+           due_date = ?, status = ?, notes = ?
        WHERE id = ?`,
       [
-        value.customer_id,
-        value.project_id || null,
-        value.proposal_id || null,
-        value.template_id,
-        value.subject || null,
-        value.total_amount,
-        value.currency,
-        value.tax_amount,
-        value.discount_amount,
-        finalAmount,
-        value.due_date || null,
-        value.status,
-        htmlContent,
-        value.notes || null,
-        id,
+        value.client_id, value.project_id || null, value.proposal_id || null,
+        value.template_id, value.subject || null, value.total_amount, value.currency,
+        value.tax_amount, value.discount_amount, finalAmount,
+        value.due_date || null, value.status, value.notes || null, id,
       ]
     );
 
-    // Update line items (delete old, insert new)
-    await pool.execute('DELETE FROM invoice_line_items WHERE invoice_id = ?', [id]);
+    await conn.execute('DELETE FROM invoice_line_items WHERE invoice_id = ?', [id]);
     if (value.line_items && value.line_items.length > 0) {
       for (const item of value.line_items) {
-        const totalPrice = item.quantity * item.unit_price;
-        await pool.execute(
+        await conn.execute(
           `INSERT INTO invoice_line_items (invoice_id, description, quantity, unit_price, total_price)
            VALUES (?, ?, ?, ?, ?)`,
-          [id, item.description, item.quantity, item.unit_price, totalPrice]
+          [id, item.description, item.quantity, item.unit_price, item.quantity * item.unit_price]
         );
       }
     }
 
-    // Regenerate PDF
-    const pdfPath = path.join(__dirname, '../../uploads/pdfs', `invoice_${id}.pdf`);
+    await conn.commit();
+
+    const pdfPath = path.join(PDF_DIR, `invoice_${id}.pdf`);
     await generatePDF(htmlContent, pdfPath);
     await pool.execute('UPDATE invoices SET pdf_path = ? WHERE id = ?', [pdfPath, id]);
 
-    const [invoices] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [id]);
-    res.json({ invoice: invoices[0] });
+    const [[invoice]] = await pool.execute('SELECT * FROM invoices WHERE id = ?', [id]);
+    res.json({ invoice });
   } catch (error) {
+    await conn.rollback();
     console.error('Update invoice error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    conn.release();
   }
 };
 
@@ -360,6 +335,40 @@ const generateInvoicePDF = async (req, res) => {
   }
 };
 
+const sendInvoiceEmailToCustomer = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [[invoice]] = await pool.execute(
+      `SELECT i.*, cl.company_name AS client_name,
+       cc.name AS contact_name, cc.email AS contact_email
+       FROM invoices i
+       LEFT JOIN clients cl ON i.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
+       WHERE i.id = ?`,
+      [id]
+    );
+
+    if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+    if (!invoice.pdf_path) return res.status(400).json({ error: 'PDF not generated yet. Save the invoice first.' });
+    if (!invoice.contact_email) return res.status(400).json({ error: 'Primary contact has no email address' });
+
+    await sendInvoiceEmail(
+      invoice.contact_email,
+      invoice.contact_name || invoice.client_name,
+      invoice.invoice_number,
+      invoice.pdf_path
+    );
+
+    await pool.execute("UPDATE invoices SET status = 'sent' WHERE id = ? AND status = 'draft'", [id]);
+
+    res.json({ message: 'Invoice emailed successfully' });
+  } catch (error) {
+    console.error('Send invoice email error:', error);
+    res.status(500).json({ error: 'Failed to send email. Please check email configuration.' });
+  }
+};
+
 module.exports = {
   getInvoices,
   getInvoiceById,
@@ -367,5 +376,5 @@ module.exports = {
   updateInvoice,
   deleteInvoice,
   generateInvoicePDF,
+  sendInvoiceEmailToCustomer,
 };
-

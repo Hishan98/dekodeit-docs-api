@@ -2,18 +2,20 @@ const pool = require('../config/database');
 const Joi = require('joi');
 const { generateProposalNumber } = require('../services/numberingService');
 const { generatePDF, replaceTemplateVariables } = require('../services/pdfService');
+const { loadTemplateFile } = require('../services/templateFileService');
 const { sendProposalEmail } = require('../services/emailService');
 const path = require('path');
+const { PDF_DIR } = require('../config/paths');
 
 const proposalSchema = Joi.object({
-  customer_id: Joi.number().integer().required(),
+  client_id: Joi.number().integer().required(),
   project_id: Joi.number().integer().allow(null),
   template_id: Joi.number().integer().required(),
   subject: Joi.string().allow('', null),
   total_amount: Joi.number().positive().required(),
   currency: Joi.string().default('LKR'),
   valid_until: Joi.date().allow(null),
-  status: Joi.string().valid('draft', 'sent', 'accepted', 'declined', 'expired').default('draft'),
+  status: Joi.string().valid('draft', 'sent', 'revision_requested', 'resubmitted', 'accepted', 'declined', 'expired').default('draft'),
   notes: Joi.string().allow('', null),
   line_items: Joi.array().items(
     Joi.object({
@@ -34,10 +36,10 @@ const proposalSchema = Joi.object({
 const getProposals = async (req, res) => {
   try {
     const [proposals] = await pool.execute(
-      `SELECT p.*, c.name as customer_name, c.email as customer_email,
+      `SELECT p.*, cl.company_name AS client_name,
        pt.name as template_name, pr.name as project_name
        FROM proposals p
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
        LEFT JOIN proposal_templates pt ON p.template_id = pt.id
        LEFT JOIN projects pr ON p.project_id = pr.id
        ORDER BY p.created_at DESC`
@@ -54,11 +56,14 @@ const getProposalById = async (req, res) => {
     const { id } = req.params;
 
     const [proposals] = await pool.execute(
-      `SELECT p.*, c.name as customer_name, c.email as customer_email, c.phone as customer_phone,
-       c.company as customer_company, c.address as customer_address,
+      `SELECT p.*,
+       cl.company_name AS client_name, cl.address AS client_address,
+       cc.name AS contact_name, cc.email AS contact_email,
+       cc.phone AS contact_phone, cc.job_title AS contact_job_title,
        pt.name as template_name, pr.name as project_name
        FROM proposals p
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
        LEFT JOIN proposal_templates pt ON p.template_id = pt.id
        LEFT JOIN projects pr ON p.project_id = pr.id
        WHERE p.id = ?`,
@@ -69,13 +74,11 @@ const getProposalById = async (req, res) => {
       return res.status(404).json({ error: 'Proposal not found' });
     }
 
-    // Get line items
     const [lineItems] = await pool.execute(
       'SELECT * FROM proposal_line_items WHERE proposal_id = ?',
       [id]
     );
 
-    // Get payment stages
     const [paymentStages] = await pool.execute(
       'SELECT * FROM payment_stages WHERE proposal_id = ? ORDER BY id ASC',
       [id]
@@ -93,46 +96,47 @@ const getProposalById = async (req, res) => {
 };
 
 const createProposal = async (req, res) => {
+  const conn = await pool.getConnection();
   try {
     const { error, value } = proposalSchema.validate(req.body);
     if (error) {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    // Generate proposal number
-    const proposalNumber = await generateProposalNumber();
-
-    // Get template
-    const [templates] = await pool.execute(
-      'SELECT * FROM proposal_templates WHERE id = ?',
+    const [[template]] = await conn.execute(
+      'SELECT id, file_path FROM proposal_templates WHERE id = ?',
       [value.template_id]
     );
+    if (!template) return res.status(404).json({ error: 'Template not found' });
 
-    if (templates.length === 0) {
-      return res.status(404).json({ error: 'Template not found' });
-    }
-
-    // Get customer
-    const [customers] = await pool.execute(
-      'SELECT * FROM customers WHERE id = ?',
-      [value.customer_id]
+    // Load client + primary contact for PDF variables
+    const [[client]] = await conn.execute(
+      `SELECT cl.*, cc.name AS contact_name, cc.email AS contact_email,
+              cc.phone AS contact_phone, cc.job_title AS contact_job_title
+       FROM clients cl
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
+       WHERE cl.id = ?`,
+      [value.client_id]
     );
+    if (!client) return res.status(404).json({ error: 'Client not found' });
 
-    if (customers.length === 0) {
-      return res.status(404).json({ error: 'Customer not found' });
-    }
+    const proposalNumber = await generateProposalNumber();
 
-    const customer = customers[0];
-    const template = templates[0];
-
-    // Prepare variables for template replacement
     const variables = {
       'proposal_number': proposalNumber,
-      'customer.name': customer.name,
-      'customer.email': customer.email || '',
-      'customer.phone': customer.phone || '',
-      'customer.company': customer.company || '',
-      'customer.address': customer.address || '',
+      'client.company_name': client.company_name,
+      'client.address': client.address || '',
+      'client.vat_id': client.vat_id || '',
+      'contact.name': client.contact_name || '',
+      'contact.email': client.contact_email || '',
+      'contact.phone': client.contact_phone || '',
+      'contact.job_title': client.contact_job_title || '',
+      // Legacy aliases kept for backward template compatibility
+      'customer.name': client.contact_name || client.company_name,
+      'customer.email': client.contact_email || '',
+      'customer.phone': client.contact_phone || '',
+      'customer.company': client.company_name,
+      'customer.address': client.address || '',
       'proposal.total_amount': value.total_amount.toFixed(2),
       'proposal.currency': value.currency,
       'proposal.valid_until': value.valid_until ? new Date(value.valid_until).toLocaleDateString() : '',
@@ -140,79 +144,65 @@ const createProposal = async (req, res) => {
       'date': new Date().toLocaleDateString(),
     };
 
-    // Replace template variables
-    let htmlContent = replaceTemplateVariables(template.html_content, variables);
+    // Load template from file and merge variables
+    const rawHtml = await loadTemplateFile(template.file_path);
+    const htmlContent = replaceTemplateVariables(rawHtml, variables);
 
-    // Insert proposal
-    const [result] = await pool.execute(
-      `INSERT INTO proposals (proposal_number, customer_id, project_id, template_id, subject,
-       total_amount, currency, valid_until, status, html_content, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    await conn.beginTransaction();
+
+    const [result] = await conn.execute(
+      `INSERT INTO proposals (proposal_number, client_id, project_id, template_id, subject,
+       total_amount, currency, valid_until, status, notes, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
-        proposalNumber,
-        value.customer_id,
-        value.project_id || null,
-        value.template_id,
-        value.subject || null,
-        value.total_amount,
-        value.currency,
-        value.valid_until || null,
-        value.status,
-        htmlContent,
-        value.notes || null,
-        req.user.id,
+        proposalNumber, value.client_id, value.project_id || null, value.template_id,
+        value.subject || null, value.total_amount, value.currency,
+        value.valid_until || null, value.status, value.notes || null, req.user.id,
       ]
     );
 
     const proposalId = result.insertId;
 
-    // Insert line items
     if (value.line_items && value.line_items.length > 0) {
       for (const item of value.line_items) {
-        const totalPrice = item.quantity * item.unit_price;
-        await pool.execute(
+        await conn.execute(
           `INSERT INTO proposal_line_items (proposal_id, description, quantity, unit_price, total_price)
            VALUES (?, ?, ?, ?, ?)`,
-          [proposalId, item.description, item.quantity, item.unit_price, totalPrice]
+          [proposalId, item.description, item.quantity, item.unit_price, item.quantity * item.unit_price]
         );
       }
     }
 
-    // Insert payment stages
     if (value.payment_stages && value.payment_stages.length > 0) {
       for (const stage of value.payment_stages) {
-        const amount = (value.total_amount * stage.percentage) / 100;
-        await pool.execute(
+        await conn.execute(
           `INSERT INTO payment_stages (proposal_id, stage_name, percentage, amount, due_date, status)
            VALUES (?, ?, ?, ?, ?, 'pending')`,
-          [proposalId, stage.stage_name, stage.percentage, amount, stage.due_date || null]
+          [proposalId, stage.stage_name, stage.percentage, (value.total_amount * stage.percentage) / 100, stage.due_date || null]
         );
       }
     }
 
-    // Generate PDF
-    const pdfPath = path.join(__dirname, '../../uploads/pdfs', `proposal_${proposalId}.pdf`);
+    await conn.commit();
+
+    // Generate PDF outside transaction (filesystem op — not rolled back anyway)
+    const pdfPath = path.join(PDF_DIR, `proposal_${proposalId}.pdf`);
     await generatePDF(htmlContent, pdfPath);
+    await pool.execute('UPDATE proposals SET pdf_path = ? WHERE id = ?', [pdfPath, proposalId]);
 
-    // Update proposal with PDF path
-    await pool.execute(
-      'UPDATE proposals SET pdf_path = ? WHERE id = ?',
-      [pdfPath, proposalId]
-    );
-
-    const [proposals] = await pool.execute(
-      'SELECT * FROM proposals WHERE id = ?',
-      [proposalId]
-    );
-
-    res.status(201).json({ proposal: proposals[0] });
+    const [[proposal]] = await pool.execute('SELECT * FROM proposals WHERE id = ?', [proposalId]);
+    res.status(201).json({ proposal });
   } catch (error) {
+    await conn.rollback();
     console.error('Create proposal error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    conn.release();
   }
 };
 
 const updateProposal = async (req, res) => {
+  const conn = await pool.getConnection();
   try {
     const { id } = req.params;
     const { error, value } = proposalSchema.validate(req.body);
@@ -220,41 +210,38 @@ const updateProposal = async (req, res) => {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    // Get existing proposal
-    const [existing] = await pool.execute(
-      'SELECT * FROM proposals WHERE id = ?',
-      [id]
-    );
+    const [[existing]] = await conn.execute('SELECT * FROM proposals WHERE id = ?', [id]);
+    if (!existing) return res.status(404).json({ error: 'Proposal not found' });
 
-    if (existing.length === 0) {
-      return res.status(404).json({ error: 'Proposal not found' });
-    }
-
-    // Get template and customer for HTML regeneration
-    const [templates] = await pool.execute(
-      'SELECT * FROM proposal_templates WHERE id = ?',
+    const [[template]] = await conn.execute(
+      'SELECT id, file_path FROM proposal_templates WHERE id = ?',
       [value.template_id]
     );
-    const [customers] = await pool.execute(
-      'SELECT * FROM customers WHERE id = ?',
-      [value.customer_id]
+    const [[client]] = await conn.execute(
+      `SELECT cl.*, cc.name AS contact_name, cc.email AS contact_email,
+              cc.phone AS contact_phone, cc.job_title AS contact_job_title
+       FROM clients cl
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
+       WHERE cl.id = ?`,
+      [value.client_id]
     );
+    if (!template || !client) return res.status(404).json({ error: 'Template or client not found' });
 
-    if (templates.length === 0 || customers.length === 0) {
-      return res.status(404).json({ error: 'Template or customer not found' });
-    }
-
-    const customer = customers[0];
-    const template = templates[0];
-
-    // Prepare variables
     const variables = {
-      'proposal_number': existing[0].proposal_number,
-      'customer.name': customer.name,
-      'customer.email': customer.email || '',
-      'customer.phone': customer.phone || '',
-      'customer.company': customer.company || '',
-      'customer.address': customer.address || '',
+      'proposal_number': existing.proposal_number,
+      'client.company_name': client.company_name,
+      'client.address': client.address || '',
+      'client.vat_id': client.vat_id || '',
+      'contact.name': client.contact_name || '',
+      'contact.email': client.contact_email || '',
+      'contact.phone': client.contact_phone || '',
+      'contact.job_title': client.contact_job_title || '',
+      // Legacy aliases
+      'customer.name': client.contact_name || client.company_name,
+      'customer.email': client.contact_email || '',
+      'customer.phone': client.contact_phone || '',
+      'customer.company': client.company_name,
+      'customer.address': client.address || '',
       'proposal.total_amount': value.total_amount.toFixed(2),
       'proposal.currency': value.currency,
       'proposal.valid_until': value.valid_until ? new Date(value.valid_until).toLocaleDateString() : '',
@@ -262,65 +249,59 @@ const updateProposal = async (req, res) => {
       'date': new Date().toLocaleDateString(),
     };
 
-    let htmlContent = replaceTemplateVariables(template.html_content, variables);
+    const rawHtml = await loadTemplateFile(template.file_path);
+    const htmlContent = replaceTemplateVariables(rawHtml, variables);
 
-    // Update proposal
-    await pool.execute(
-      `UPDATE proposals 
-       SET customer_id = ?, project_id = ?, template_id = ?, subject = ?,
-       total_amount = ?, currency = ?, valid_until = ?, status = ?, html_content = ?, notes = ?
+    await conn.beginTransaction();
+
+    await conn.execute(
+      `UPDATE proposals
+       SET client_id = ?, project_id = ?, template_id = ?, subject = ?,
+           total_amount = ?, currency = ?, valid_until = ?, status = ?, notes = ?
        WHERE id = ?`,
       [
-        value.customer_id,
-        value.project_id || null,
-        value.template_id,
-        value.subject || null,
-        value.total_amount,
-        value.currency,
-        value.valid_until || null,
-        value.status,
-        htmlContent,
-        value.notes || null,
-        id,
+        value.client_id, value.project_id || null, value.template_id, value.subject || null,
+        value.total_amount, value.currency, value.valid_until || null,
+        value.status, value.notes || null, id,
       ]
     );
 
-    // Update line items (delete old, insert new)
-    await pool.execute('DELETE FROM proposal_line_items WHERE proposal_id = ?', [id]);
+    await conn.execute('DELETE FROM proposal_line_items WHERE proposal_id = ?', [id]);
     if (value.line_items && value.line_items.length > 0) {
       for (const item of value.line_items) {
-        const totalPrice = item.quantity * item.unit_price;
-        await pool.execute(
+        await conn.execute(
           `INSERT INTO proposal_line_items (proposal_id, description, quantity, unit_price, total_price)
            VALUES (?, ?, ?, ?, ?)`,
-          [id, item.description, item.quantity, item.unit_price, totalPrice]
+          [id, item.description, item.quantity, item.unit_price, item.quantity * item.unit_price]
         );
       }
     }
 
-    // Update payment stages
-    await pool.execute('DELETE FROM payment_stages WHERE proposal_id = ?', [id]);
+    await conn.execute('DELETE FROM payment_stages WHERE proposal_id = ?', [id]);
     if (value.payment_stages && value.payment_stages.length > 0) {
       for (const stage of value.payment_stages) {
-        const amount = (value.total_amount * stage.percentage) / 100;
-        await pool.execute(
+        await conn.execute(
           `INSERT INTO payment_stages (proposal_id, stage_name, percentage, amount, due_date, status)
            VALUES (?, ?, ?, ?, ?, 'pending')`,
-          [id, stage.stage_name, stage.percentage, amount, stage.due_date || null]
+          [id, stage.stage_name, stage.percentage, (value.total_amount * stage.percentage) / 100, stage.due_date || null]
         );
       }
     }
 
-    // Regenerate PDF
-    const pdfPath = path.join(__dirname, '../../uploads/pdfs', `proposal_${id}.pdf`);
+    await conn.commit();
+
+    const pdfPath = path.join(PDF_DIR, `proposal_${id}.pdf`);
     await generatePDF(htmlContent, pdfPath);
     await pool.execute('UPDATE proposals SET pdf_path = ? WHERE id = ?', [pdfPath, id]);
 
-    const [proposals] = await pool.execute('SELECT * FROM proposals WHERE id = ?', [id]);
-    res.json({ proposal: proposals[0] });
+    const [[proposal]] = await pool.execute('SELECT * FROM proposals WHERE id = ?', [id]);
+    res.json({ proposal });
   } catch (error) {
+    await conn.rollback();
     console.error('Update proposal error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    conn.release();
   }
 };
 
@@ -371,11 +352,12 @@ const sendProposalEmailToCustomer = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Get proposal with customer details
     const [proposals] = await pool.execute(
-      `SELECT p.*, c.name as customer_name, c.email as customer_email
+      `SELECT p.*, cl.company_name AS client_name,
+       cc.name AS contact_name, cc.email AS contact_email
        FROM proposals p
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
        WHERE p.id = ?`,
       [id]
     );
@@ -390,28 +372,46 @@ const sendProposalEmailToCustomer = async (req, res) => {
       return res.status(400).json({ error: 'PDF not generated yet. Please generate PDF first.' });
     }
 
-    if (!proposal.customer_email) {
-      return res.status(400).json({ error: 'Customer email not found' });
+    if (!proposal.contact_email) {
+      return res.status(400).json({ error: 'Primary contact has no email address' });
     }
 
-    // Send email
     await sendProposalEmail(
-      proposal.customer_email,
-      proposal.customer_name,
+      proposal.contact_email || '',
+      proposal.contact_name || proposal.client_name,
       proposal.proposal_number,
       proposal.pdf_path
     );
 
-    // Update proposal status to 'sent'
+    const newStatus = proposal.status === 'revision_requested' ? 'resubmitted' : 'sent';
     await pool.execute(
       'UPDATE proposals SET status = ? WHERE id = ?',
-      ['sent', id]
+      [newStatus, id]
     );
 
     res.json({ message: 'Proposal email sent successfully' });
   } catch (error) {
     console.error('Send proposal email error:', error);
     res.status(500).json({ error: 'Failed to send email. Please check email configuration.' });
+  }
+};
+
+const updateProposalStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+    const allowed = ['draft', 'sent', 'revision_requested', 'resubmitted', 'accepted', 'declined', 'expired'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: `Invalid status. Allowed: ${allowed.join(', ')}` });
+    }
+    const [[proposal]] = await pool.execute("SELECT id FROM proposals WHERE id = ?", [id]);
+    if (!proposal) return res.status(404).json({ error: "Proposal not found" });
+    await pool.execute("UPDATE proposals SET status = ? WHERE id = ?", [status, id]);
+    const [[updated]] = await pool.execute("SELECT * FROM proposals WHERE id = ?", [id]);
+    res.json({ proposal: updated });
+  } catch (error) {
+    console.error("Update proposal status error:", error);
+    res.status(500).json({ error: "Internal server error" });
   }
 };
 
@@ -423,5 +423,5 @@ module.exports = {
   deleteProposal,
   generateProposalPDF,
   sendProposalEmailToCustomer,
+  updateProposalStatus,
 };
-

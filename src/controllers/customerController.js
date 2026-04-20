@@ -74,13 +74,27 @@ const customerSchema = Joi.object({
  */
 const getCustomers = async (req, res) => {
   try {
-    const [customers] = await pool.execute(
-      `SELECT c.*, u.name as created_by_name 
-       FROM customers c 
-       LEFT JOIN users u ON c.created_by = u.id 
-       ORDER BY c.created_at DESC`
-    );
+    // ?status=all returns every status (admin use), default returns only active
+    const { status } = req.query;
+    const allowedStatuses = ['active', 'inactive', 'archived'];
+    const filterStatus = allowedStatuses.includes(status) ? status : null;
 
+    let query = `SELECT c.*, u.name as created_by_name
+                 FROM customers c
+                 LEFT JOIN users u ON c.created_by = u.id`;
+
+    const params = [];
+    if (status === 'all') {
+      // no filter — return everything
+    } else if (filterStatus) {
+      query += ' WHERE c.status = ?';
+      params.push(filterStatus);
+    } else {
+      query += " WHERE c.status = 'active'";
+    }
+    query += ' ORDER BY c.created_at DESC';
+
+    const [customers] = await pool.execute(query, params);
     res.json({ customers });
   } catch (error) {
     console.error("Get customers error:", error);
@@ -147,19 +161,21 @@ const getCustomerById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    const [customers] = await pool.execute(
-      `SELECT c.*, u.name as created_by_name 
-       FROM customers c 
-       LEFT JOIN users u ON c.created_by = u.id 
+    // No status filter — detail view works for any status so archived
+    // customers still display correctly inside linked documents
+    const [[customer]] = await pool.execute(
+      `SELECT c.*, u.name as created_by_name
+       FROM customers c
+       LEFT JOIN users u ON c.created_by = u.id
        WHERE c.id = ?`,
       [id]
     );
 
-    if (customers.length === 0) {
+    if (!customer) {
       return res.status(404).json({ error: "Customer not found" });
     }
 
-    res.json({ customer: customers[0] });
+    res.json({ customer });
   } catch (error) {
     console.error("Get customer error:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -307,9 +323,9 @@ const updateCustomer = async (req, res) => {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    await pool.execute(
-      `UPDATE customers 
-       SET name = ?, email = ?, phone = ?, company = ?, address = ?, vat_id = ?, notes = ? 
+    const [result] = await pool.execute(
+      `UPDATE customers
+       SET name = ?, email = ?, phone = ?, company = ?, address = ?, vat_id = ?, notes = ?
        WHERE id = ?`,
       [
         value.name,
@@ -323,16 +339,15 @@ const updateCustomer = async (req, res) => {
       ]
     );
 
-    const [customers] = await pool.execute(
-      "SELECT * FROM customers WHERE id = ?",
-      [id]
-    );
-
-    if (customers.length === 0) {
+    if (result.affectedRows === 0) {
       return res.status(404).json({ error: "Customer not found" });
     }
 
-    res.json({ customer: customers[0] });
+    const [[customer]] = await pool.execute(
+      "SELECT * FROM customers WHERE id = ?", [id]
+    );
+
+    res.json({ customer });
   } catch (error) {
     console.error("Update customer error:", error);
     res.status(500).json({ error: "Internal server error" });
@@ -348,37 +363,80 @@ const updateCustomer = async (req, res) => {
  *     security:
  *       - bearerAuth: []
  */
+// Returns invoices and proposals linked to a customer so the frontend
+// can show an impact summary before deletion.
+const getLinkedRecords = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [invoices] = await pool.execute(
+      "SELECT id, invoice_number, status, total_amount FROM invoices WHERE customer_id = ? ORDER BY created_at DESC",
+      [id]
+    );
+    const [proposals] = await pool.execute(
+      "SELECT id, proposal_number, subject, status FROM proposals WHERE customer_id = ? ORDER BY created_at DESC",
+      [id]
+    );
+    const [projects] = await pool.execute(
+      "SELECT id, name, status, phase FROM projects WHERE customer_id = ? ORDER BY created_at DESC",
+      [id]
+    );
+    res.json({ invoices, proposals, projects });
+  } catch (error) {
+    console.error("Get linked records error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+// Archive a customer (soft delete) — linked records are untouched because the
+// customer row remains in the database.  Use PATCH /customers/:id/status to
+// move between active / inactive / archived at any time.
 const deleteCustomer = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // Check if customer has associated invoices or proposals
-    const [invoices] = await pool.execute(
-      "SELECT id FROM invoices WHERE customer_id = ? LIMIT 1",
+    const [result] = await pool.execute(
+      "UPDATE customers SET status = 'archived' WHERE id = ?",
       [id]
     );
-    const [proposals] = await pool.execute(
-      "SELECT id FROM proposals WHERE customer_id = ? LIMIT 1",
-      [id]
-    );
-
-    if (invoices.length > 0 || proposals.length > 0) {
-      return res.status(400).json({
-        error: "Cannot delete customer with associated invoices or proposals",
-      });
-    }
-
-    const [result] = await pool.execute("DELETE FROM customers WHERE id = ?", [
-      id,
-    ]);
 
     if (result.affectedRows === 0) {
       return res.status(404).json({ error: "Customer not found" });
     }
 
-    res.json({ message: "Customer deleted successfully" });
+    res.json({ message: "Customer archived successfully" });
   } catch (error) {
-    console.error("Delete customer error:", error);
+    console.error("Archive customer error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+};
+
+const updateCustomerStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const allowed = ["active", "inactive", "archived"];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ error: "status must be one of: active, inactive, archived" });
+    }
+
+    const [result] = await pool.execute(
+      "UPDATE customers SET status = ? WHERE id = ?",
+      [status, id]
+    );
+
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ error: "Customer not found" });
+    }
+
+    const [[customer]] = await pool.execute(
+      "SELECT * FROM customers WHERE id = ?",
+      [id]
+    );
+
+    res.json({ customer });
+  } catch (error) {
+    console.error("Update customer status error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 };
@@ -389,4 +447,6 @@ module.exports = {
   createCustomer,
   updateCustomer,
   deleteCustomer,
+  updateCustomerStatus,
+  getLinkedRecords,
 };

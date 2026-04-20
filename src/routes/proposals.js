@@ -12,6 +12,7 @@ router.put('/:id', proposalController.updateProposal);
 router.delete('/:id', proposalController.deleteProposal);
 router.get('/:id/pdf', proposalController.generateProposalPDF);
 router.post('/:id/send-email', proposalController.sendProposalEmailToCustomer);
+router.patch('/:id/status', proposalController.updateProposalStatus);
 
 module.exports = router;
 

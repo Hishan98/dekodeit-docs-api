@@ -132,9 +132,9 @@ const createPayment = async (req, res) => {
     // Update payment stage status if payment is for proposal
     if (value.proposal_id && value.payment_type === 'advance') {
       await pool.execute(
-        `UPDATE payment_stages 
-         SET status = 'paid' 
-         WHERE proposal_id = ? AND stage_name LIKE '%kickoff%' OR stage_name LIKE '%advance%'`,
+        `UPDATE payment_stages
+         SET status = 'paid'
+         WHERE proposal_id = ? AND (stage_name LIKE '%kickoff%' OR stage_name LIKE '%advance%')`,
         [value.proposal_id]
       );
     }

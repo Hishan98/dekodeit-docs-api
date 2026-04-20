@@ -1,114 +1,94 @@
 const pool = require('../config/database');
 
 /**
- * Generate next invoice number (format: D251101)
- * D = Invoice prefix
- * 25 = Year (last 2 digits)
- * 11 = Month
- * 01 = Sequential number
+ * Generate a document number atomically using MySQL advisory locks.
+ * The lock ensures two concurrent requests cannot grab the same sequence number.
+ *
+ * Format examples:
+ *   Invoice:          D260401
+ *   Proposal:         P260401
+ *   Design Document:  DD260401
+ *   Service Agreement: S260401
+ *
+ * Structure: <prefix><YY><MM><seq2>
  */
-async function generateInvoiceNumber() {
-  const now = new Date();
-  const year = now.getFullYear() % 100; // Last 2 digits
-  const month = now.getMonth() + 1;
-  const prefix = 'D';
-
-  return generateNumber('invoice', prefix, year, month);
-}
-
-/**
- * Generate next proposal number (format: P251101)
- * P = Proposal prefix
- * 25 = Year (last 2 digits)
- * 11 = Month
- * 01 = Sequential number
- */
-async function generateProposalNumber() {
-  const now = new Date();
-  const year = now.getFullYear() % 100; // Last 2 digits
-  const month = now.getMonth() + 1;
-  const prefix = 'P';
-
-  return generateNumber('proposal', prefix, year, month);
-}
-
 async function generateNumber(type, prefix, year, month) {
+  const lockName = `numbering_${type}_${year}_${month}`;
+  const conn = await pool.getConnection();
+
   try {
-    // Get or create sequence record
-    const [existing] = await pool.execute(
-      `SELECT sequence FROM numbering_sequences 
-       WHERE type = ? AND year = ? AND month = ?`,
-      [type, year, month]
+    // Acquire advisory lock (timeout 5 seconds)
+    const [[lockResult]] = await conn.execute(
+      'SELECT GET_LOCK(?, 5) AS acquired',
+      [lockName]
     );
 
-    let sequence;
-    if (existing.length === 0) {
-      // Create new sequence for this month
-      sequence = 1;
-      await pool.execute(
-        `INSERT INTO numbering_sequences (type, prefix, year, month, sequence, last_number) 
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [type, prefix, year, month, sequence, null]
-      );
-    } else {
-      // Increment existing sequence
-      sequence = existing[0].sequence + 1;
-      await pool.execute(
-        `UPDATE numbering_sequences 
-         SET sequence = ?, last_number = ? 
-         WHERE type = ? AND year = ? AND month = ?`,
-        [sequence, null, type, year, month]
-      );
+    if (!lockResult.acquired) {
+      throw new Error(`Could not acquire numbering lock for ${type}`);
     }
 
-    // Format: P251101 or D251101
-    const number = `${prefix}${year.toString().padStart(2, '0')}${month.toString().padStart(2, '0')}${sequence.toString().padStart(2, '0')}`;
+    try {
+      const [[existing]] = await conn.execute(
+        `SELECT sequence FROM numbering_sequences
+         WHERE type = ? AND year = ? AND month = ?`,
+        [type, year, month]
+      );
 
-    // Update last_number
-    await pool.execute(
-      `UPDATE numbering_sequences 
-       SET last_number = ? 
-       WHERE type = ? AND year = ? AND month = ?`,
-      [number, type, year, month]
-    );
+      let sequence;
+      if (!existing) {
+        sequence = 1;
+        await conn.execute(
+          `INSERT INTO numbering_sequences (type, prefix, year, month, sequence, last_number)
+           VALUES (?, ?, ?, ?, ?, NULL)`,
+          [type, prefix, year, month, sequence]
+        );
+      } else {
+        sequence = existing.sequence + 1;
+        await conn.execute(
+          `UPDATE numbering_sequences
+           SET sequence = ?
+           WHERE type = ? AND year = ? AND month = ?`,
+          [sequence, type, year, month]
+        );
+      }
 
-    return number;
-  } catch (error) {
-    console.error('Error generating number:', error);
-    throw error;
+      const number = `${prefix}${year.toString().padStart(2, '0')}${month.toString().padStart(2, '0')}${sequence.toString().padStart(2, '0')}`;
+
+      await conn.execute(
+        `UPDATE numbering_sequences
+         SET last_number = ?
+         WHERE type = ? AND year = ? AND month = ?`,
+        [number, type, year, month]
+      );
+
+      return number;
+    } finally {
+      // Always release the lock
+      await conn.execute('SELECT RELEASE_LOCK(?)', [lockName]);
+    }
+  } finally {
+    conn.release();
   }
 }
 
-/**
- * Generate next design document number (format: DD192345)
- * DD = Design Document prefix
- * 19 = Year (last 2 digits)
- * 23 = Month (2 digits)
- * 45 = Sequential number (2 digits)
- */
-async function generateDesignDocumentNumber() {
+async function generateInvoiceNumber() {
   const now = new Date();
-  const year = now.getFullYear() % 100; // Last 2 digits
-  const month = now.getMonth() + 1;
-  const prefix = 'DD';
-
-  return generateNumber('design_document', prefix, year, month);
+  return generateNumber('invoice', 'D', now.getFullYear() % 100, now.getMonth() + 1);
 }
 
-/**
- * Generate next service agreement number (format: S192345)
- * S = Service Agreement prefix
- * 19 = Year (last 2 digits)
- * 23 = Month (2 digits)
- * 45 = Sequential number (2 digits)
- */
+async function generateProposalNumber() {
+  const now = new Date();
+  return generateNumber('proposal', 'P', now.getFullYear() % 100, now.getMonth() + 1);
+}
+
+async function generateDesignDocumentNumber() {
+  const now = new Date();
+  return generateNumber('design_document', 'DD', now.getFullYear() % 100, now.getMonth() + 1);
+}
+
 async function generateServiceAgreementNumber() {
   const now = new Date();
-  const year = now.getFullYear() % 100; // Last 2 digits
-  const month = now.getMonth() + 1;
-  const prefix = 'S';
-
-  return generateNumber('service_agreement', prefix, year, month);
+  return generateNumber('service_agreement', 'S', now.getFullYear() % 100, now.getMonth() + 1);
 }
 
 module.exports = {
@@ -117,4 +97,3 @@ module.exports = {
   generateDesignDocumentNumber,
   generateServiceAgreementNumber,
 };
-

@@ -5,7 +5,15 @@ const compression = require("compression");
 const morgan = require("morgan");
 const rateLimit = require("express-rate-limit");
 const slowDown = require("express-slow-down");
+const path = require("path");
+const fs = require("fs");
 require("dotenv").config();
+
+// Ensure uploads/avatars directory exists
+const avatarsDir = path.join(__dirname, "..", "uploads", "avatars");
+if (!fs.existsSync(avatarsDir)) {
+  fs.mkdirSync(avatarsDir, { recursive: true });
+}
 
 const swaggerJsdoc = require("swagger-jsdoc");
 const swaggerUi = require("swagger-ui-express");
@@ -20,7 +28,8 @@ const swaggerOptions = {
     info: {
       title: "Dekode IT Docs API",
       version: "1.0.0",
-      description: "Invoice, Proposal, Design Document, and Service Agreement Management System API. Features include JWT authentication, role-based access control, auto-numbering, PDF generation, file uploads, and comprehensive document tracking.",
+      description:
+        "Invoice, Proposal, Design Document, and Service Agreement Management System API. Features include JWT authentication, role-based access control, auto-numbering, PDF generation, file uploads, and comprehensive document tracking.",
     },
     servers: [
       {
@@ -49,14 +58,22 @@ const swaggerOptions = {
 const swaggerSpec = swaggerJsdoc(swaggerOptions);
 
 // Middleware
-app.use(helmet());
+// crossOriginResourcePolicy is set to cross-origin so that static assets
+// (uploaded files, avatars) can be loaded by the Next.js frontend on a
+// different port/origin. helmet's default "same-origin" blocks cross-origin
+// <img> loads even when CORS is open.
+app.use(
+  helmet({
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 app.use(compression());
 app.use(morgan("dev"));
 app.use(
   cors({
     origin: process.env.CORS_ORIGIN || "http://localhost:3000",
     credentials: true,
-  })
+  }),
 );
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
@@ -64,7 +81,7 @@ app.use(express.urlencoded({ extended: true, limit: "10mb" }));
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // limit each IP to 100 requests per windowMs
+  max: 10000, // limit each IP to 100 requests per windowMs
   message: "Too many requests from this IP, please try again later.",
 });
 
@@ -77,12 +94,26 @@ const speedLimiter = slowDown({
 app.use("/api/", limiter);
 app.use("/api/", speedLimiter);
 
+// Serve uploaded files — cross-origin explicitly allowed so the frontend
+// (different port) can load avatars and other assets as <img> tags.
+app.use("/uploads", (_req, res, next) => {
+  res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+  next();
+});
+app.use(
+  "/uploads",
+  express.static(path.join(__dirname, "..", "uploads"), {
+    maxAge: "7d",
+    etag: true,
+  })
+);
+
 // Swagger documentation
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
-app.use("/api/customers", require("./routes/customers"));
+app.use("/api/clients", require("./routes/clients"));
 app.use("/api/proposals", require("./routes/proposals"));
 app.use("/api/invoices", require("./routes/invoices"));
 app.use("/api/projects", require("./routes/projects"));
@@ -122,6 +153,10 @@ if (process.env.ENABLE_RECURRING_BILLS_CRON !== "false") {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`API Documentation: http://localhost:${PORT}/api-docs`);
+
+  // Verify SMTP on startup — logs a warning if misconfigured, never crashes the server
+  const { verifyConnection } = require("./services/emailService");
+  verifyConnection();
 });
 
 module.exports = app;

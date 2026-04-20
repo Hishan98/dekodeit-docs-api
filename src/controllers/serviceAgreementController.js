@@ -2,13 +2,15 @@ const pool = require('../config/database');
 const Joi = require('joi');
 const { generateServiceAgreementNumber } = require('../services/numberingService');
 const { generatePDF, replaceTemplateVariables } = require('../services/pdfService');
+const { loadTemplateFile } = require('../services/templateFileService');
 const path = require('path');
+const { PDF_DIR } = require('../config/paths');
 
 const serviceAgreementSchema = Joi.object({
   project_id: Joi.number().integer().required(),
   template_id: Joi.number().integer().required(),
   subject: Joi.string().allow('', null),
-  status: Joi.string().valid('pending', 'signed', 'rejected').default('pending'),
+  status: Joi.string().valid('draft', 'sent', 'revision_requested', 'resubmitted', 'signed', 'rejected').default('draft'),
   notes: Joi.string().allow('', null),
 });
 
@@ -47,18 +49,18 @@ const serviceAgreementSchema = Joi.object({
  *                         type: string
  *                       status:
  *                         type: string
- *                         enum: ["pending", "signed", "rejected"]
+ *                         enum: ["draft","sent","revision_requested","resubmitted","signed","rejected"]
  *       500:
  *         description: Internal server error
  */
 const getServiceAgreements = async (req, res) => {
   try {
     const [agreements] = await pool.execute(
-      `SELECT sa.*, p.name as project_name, p.customer_id,
-       c.name as customer_name, sat.name as template_name
+      `SELECT sa.*, p.name as project_name, p.client_id,
+       cl.company_name as client_name, sat.name as template_name
        FROM service_agreements sa
        LEFT JOIN projects p ON sa.project_id = p.id
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
        LEFT JOIN service_agreement_templates sat ON sa.template_id = sat.id
        ORDER BY sa.created_at DESC`
     );
@@ -105,13 +107,14 @@ const getServiceAgreementById = async (req, res) => {
     const { id } = req.params;
 
     const [agreements] = await pool.execute(
-      `SELECT sa.*, p.name as project_name, p.customer_id,
-       c.name as customer_name, c.email as customer_email, c.phone as customer_phone,
-       c.company as customer_company, c.address as customer_address,
+      `SELECT sa.*, p.name as project_name, p.client_id,
+       cl.company_name as client_name, cl.address as client_address,
+       cc.name as contact_name, cc.email as contact_email, cc.phone as contact_phone,
        sat.name as template_name
        FROM service_agreements sa
        LEFT JOIN projects p ON sa.project_id = p.id
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
        LEFT JOIN service_agreement_templates sat ON sa.template_id = sat.id
        WHERE sa.id = ?`,
       [id]
@@ -133,6 +136,10 @@ const getServiceAgreementById = async (req, res) => {
  * /api/service-agreements:
  *   post:
  *     summary: Create a new service agreement
+ *     description: >
+ *       Creates a service agreement by merging project/customer data into the selected
+ *       template (loaded from its HTML file) and generating a PDF immediately.
+ *       The html_content is never stored in the database.
  *     tags: [Service Agreements]
  *     security:
  *       - bearerAuth: []
@@ -154,12 +161,12 @@ const getServiceAgreementById = async (req, res) => {
  *                 type: string
  *               status:
  *                 type: string
- *                 enum: ["pending", "signed", "rejected"]
+ *                 enum: ["draft","sent","revision_requested","resubmitted","signed","rejected"]
  *               notes:
  *                 type: string
  *     responses:
  *       201:
- *         description: Service agreement created successfully
+ *         description: Service agreement created — PDF generated immediately
  *       400:
  *         description: Validation error
  */
@@ -170,62 +177,57 @@ const createServiceAgreement = async (req, res) => {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    // Generate agreement number
     const agreementNumber = await generateServiceAgreementNumber();
 
-    // Get template
-    const [templates] = await pool.execute(
-      'SELECT * FROM service_agreement_templates WHERE id = ?',
+    const [[template]] = await pool.execute(
+      'SELECT id, file_path FROM service_agreement_templates WHERE id = ?',
       [value.template_id]
     );
+    if (!template) return res.status(404).json({ error: 'Template not found' });
 
-    if (templates.length === 0) {
-      return res.status(404).json({ error: 'Template not found' });
-    }
-
-    // Get project
     const [projects] = await pool.execute(
-      `SELECT p.*, c.name as customer_name, c.email as customer_email, 
-       c.phone as customer_phone, c.company as customer_company, c.address as customer_address
+      `SELECT p.*, cl.company_name as client_name, cl.address as client_address,
+       cc.name as contact_name, cc.email as contact_email, cc.phone as contact_phone
        FROM projects p
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
        WHERE p.id = ?`,
       [value.project_id]
     );
-
-    if (projects.length === 0) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
+    if (projects.length === 0) return res.status(404).json({ error: 'Project not found' });
 
     const project = projects[0];
-    const template = templates[0];
 
-    // Prepare variables for template replacement
     const variables = {
       'agreement_number': agreementNumber,
       'project.name': project.name || '',
-      'customer.name': project.customer_name || '',
-      'customer.email': project.customer_email || '',
-      'customer.phone': project.customer_phone || '',
-      'customer.company': project.customer_company || '',
-      'customer.address': project.customer_address || '',
+      'client.company_name': project.client_name || '',
+      'client.address': project.client_address || '',
+      'contact.name': project.contact_name || '',
+      'contact.email': project.contact_email || '',
+      'contact.phone': project.contact_phone || '',
+      // Legacy aliases for existing templates
+      'customer.name': project.contact_name || project.client_name || '',
+      'customer.email': project.contact_email || '',
+      'customer.phone': project.contact_phone || '',
+      'customer.company': project.client_name || '',
+      'customer.address': project.client_address || '',
       'agreement.subject': value.subject || '',
       'date': new Date().toLocaleDateString(),
     };
 
-    // Replace template variables
-    let htmlContent = replaceTemplateVariables(template.html_content, variables);
+    // Load template from file and merge variables
+    const rawHtml = await loadTemplateFile(template.file_path);
+    const htmlContent = replaceTemplateVariables(rawHtml, variables);
 
-    // Insert service agreement
     const [result] = await pool.execute(
-      `INSERT INTO service_agreements (agreement_number, project_id, template_id, subject, html_content, status, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO service_agreements (agreement_number, project_id, template_id, subject, status, notes, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
       [
         agreementNumber,
         value.project_id,
         value.template_id,
         value.subject || null,
-        htmlContent,
         value.status,
         value.notes || null,
         req.user.id,
@@ -234,11 +236,8 @@ const createServiceAgreement = async (req, res) => {
 
     const agreementId = result.insertId;
 
-    // Generate PDF
-    const pdfPath = path.join(__dirname, '../../uploads/pdfs', `service_agreement_${agreementId}.pdf`);
+    const pdfPath = path.join(PDF_DIR, `service_agreement_${agreementId}.pdf`);
     await generatePDF(htmlContent, pdfPath);
-
-    // Update service agreement with PDF path
     await pool.execute(
       'UPDATE service_agreements SET pdf_path = ? WHERE id = ?',
       [pdfPath, agreementId]
@@ -261,7 +260,9 @@ const createServiceAgreement = async (req, res) => {
  * /api/service-agreements/{id}:
  *   put:
  *     summary: Update a service agreement
- *     description: Update a service agreement. All required fields must be provided.
+ *     description: >
+ *       Updates a service agreement and regenerates the PDF from the template file.
+ *       The html_content is never stored in the database.
  *     tags: [Service Agreements]
  *     security:
  *       - bearerAuth: []
@@ -290,12 +291,12 @@ const createServiceAgreement = async (req, res) => {
  *                 type: string
  *               status:
  *                 type: string
- *                 enum: ["pending", "signed", "rejected"]
+ *                 enum: ["draft","sent","revision_requested","resubmitted","signed","rejected"]
  *               notes:
  *                 type: string
  *     responses:
  *       200:
- *         description: Service agreement updated successfully
+ *         description: Service agreement updated — PDF regenerated
  *       400:
  *         description: Validation error
  *       404:
@@ -311,77 +312,67 @@ const updateServiceAgreement = async (req, res) => {
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    // Get existing agreement
     const [existing] = await pool.execute(
       'SELECT * FROM service_agreements WHERE id = ?',
       [id]
     );
+    if (existing.length === 0) return res.status(404).json({ error: 'Service agreement not found' });
 
-    if (existing.length === 0) {
-      return res.status(404).json({ error: 'Service agreement not found' });
-    }
-
-    // Get template
-    const [templates] = await pool.execute(
-      'SELECT * FROM service_agreement_templates WHERE id = ?',
+    const [[template]] = await pool.execute(
+      'SELECT id, file_path FROM service_agreement_templates WHERE id = ?',
       [value.template_id]
     );
+    if (!template) return res.status(404).json({ error: 'Template not found' });
 
-    if (templates.length === 0) {
-      return res.status(404).json({ error: 'Template not found' });
-    }
-
-    // Get project
     const [projects] = await pool.execute(
-      `SELECT p.*, c.name as customer_name, c.email as customer_email, 
-       c.phone as customer_phone, c.company as customer_company, c.address as customer_address
+      `SELECT p.*, cl.company_name as client_name, cl.address as client_address,
+       cc.name as contact_name, cc.email as contact_email, cc.phone as contact_phone
        FROM projects p
-       LEFT JOIN customers c ON p.customer_id = c.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
        WHERE p.id = ?`,
       [value.project_id]
     );
-
-    if (projects.length === 0) {
-      return res.status(404).json({ error: 'Project not found' });
-    }
+    if (projects.length === 0) return res.status(404).json({ error: 'Project not found' });
 
     const project = projects[0];
-    const template = templates[0];
 
-    // Prepare variables for template replacement
     const variables = {
       'agreement_number': existing[0].agreement_number,
       'project.name': project.name || '',
-      'customer.name': project.customer_name || '',
-      'customer.email': project.customer_email || '',
-      'customer.phone': project.customer_phone || '',
-      'customer.company': project.customer_company || '',
-      'customer.address': project.customer_address || '',
+      'client.company_name': project.client_name || '',
+      'client.address': project.client_address || '',
+      'contact.name': project.contact_name || '',
+      'contact.email': project.contact_email || '',
+      'contact.phone': project.contact_phone || '',
+      // Legacy aliases for existing templates
+      'customer.name': project.contact_name || project.client_name || '',
+      'customer.email': project.contact_email || '',
+      'customer.phone': project.contact_phone || '',
+      'customer.company': project.client_name || '',
+      'customer.address': project.client_address || '',
       'agreement.subject': value.subject || '',
       'date': new Date().toLocaleDateString(),
     };
 
-    // Replace template variables
-    let htmlContent = replaceTemplateVariables(template.html_content, variables);
+    const rawHtml = await loadTemplateFile(template.file_path);
+    const htmlContent = replaceTemplateVariables(rawHtml, variables);
 
-    // Update service agreement
     await pool.execute(
-      `UPDATE service_agreements 
-       SET project_id = ?, template_id = ?, subject = ?, html_content = ?, status = ?, notes = ?
+      `UPDATE service_agreements
+       SET project_id = ?, template_id = ?, subject = ?, status = ?, notes = ?
        WHERE id = ?`,
       [
         value.project_id,
         value.template_id,
         value.subject || null,
-        htmlContent,
         value.status,
         value.notes || null,
         id,
       ]
     );
 
-    // Regenerate PDF
-    const pdfPath = path.join(__dirname, '../../uploads/pdfs', `service_agreement_${id}.pdf`);
+    const pdfPath = path.join(PDF_DIR, `service_agreement_${id}.pdf`);
     await generatePDF(htmlContent, pdfPath);
     await pool.execute('UPDATE service_agreements SET pdf_path = ? WHERE id = ?', [pdfPath, id]);
 
@@ -419,16 +410,9 @@ const deleteServiceAgreement = async (req, res) => {
       return res.status(404).json({ error: 'Service agreement not found' });
     }
 
-    const agreement = agreements[0];
-
-    // Delete PDF file
-    if (agreement.pdf_path) {
+    if (agreements[0].pdf_path) {
       const fs = require('fs').promises;
-      try {
-        await fs.unlink(agreement.pdf_path);
-      } catch (unlinkError) {
-        console.error('Error deleting PDF:', unlinkError);
-      }
+      await fs.unlink(agreements[0].pdf_path).catch(() => {});
     }
 
     await pool.execute('DELETE FROM service_agreements WHERE id = ?', [id]);
@@ -468,7 +452,6 @@ const downloadServiceAgreementPDF = async (req, res) => {
       return res.status(404).json({ error: 'PDF not generated yet' });
     }
 
-    // Check if file exists
     const fs = require('fs').promises;
     try {
       await fs.access(agreement.pdf_path);
@@ -476,8 +459,7 @@ const downloadServiceAgreementPDF = async (req, res) => {
       return res.status(404).json({ error: 'PDF file not found on server' });
     }
 
-    const fileName = `service-agreement-${agreement.agreement_number}.pdf`;
-    res.download(agreement.pdf_path, fileName);
+    res.download(agreement.pdf_path, `service-agreement-${agreement.agreement_number}.pdf`);
   } catch (error) {
     console.error('Download service agreement PDF error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -511,46 +493,15 @@ const downloadServiceAgreementPDF = async (req, res) => {
  *             properties:
  *               status:
  *                 type: string
- *                 enum: ["pending", "signed", "rejected"]
- *                 description: New status for the service agreement
+ *                 enum: ["draft","sent","revision_requested","resubmitted","signed","rejected"]
  *                 example: "signed"
  *     responses:
  *       200:
- *         description: Service agreement status updated successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 agreement:
- *                   type: object
- *                   properties:
- *                     id:
- *                       type: integer
- *                     agreement_number:
- *                       type: string
- *                     status:
- *                       type: string
+ *         description: Status updated successfully
  *       400:
  *         description: Invalid status value
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: "Invalid status. Valid values: pending, signed, rejected"
  *       404:
  *         description: Service agreement not found
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 error:
- *                   type: string
- *                   example: "Service agreement not found"
  *       500:
  *         description: Internal server error
  */
@@ -559,21 +510,17 @@ const updateServiceAgreementStatus = async (req, res) => {
     const { id } = req.params;
     const { status } = req.body;
 
-    const validStatuses = ['pending', 'signed', 'rejected'];
-    
+    const validStatuses = ['draft', 'sent', 'revision_requested', 'resubmitted', 'signed', 'rejected'];
+
     if (!validStatuses.includes(status)) {
-      return res.status(400).json({ error: 'Invalid status. Valid values: pending, signed, rejected' });
+      return res.status(400).json({ error: `Invalid status. Valid values: ${validStatuses.join(', ')}` });
     }
 
-    // Check if agreement exists
     const [existing] = await pool.execute(
       'SELECT id FROM service_agreements WHERE id = ?',
       [id]
     );
-
-    if (existing.length === 0) {
-      return res.status(404).json({ error: 'Service agreement not found' });
-    }
+    if (existing.length === 0) return res.status(404).json({ error: 'Service agreement not found' });
 
     await pool.execute(
       'UPDATE service_agreements SET status = ? WHERE id = ?',
@@ -601,4 +548,3 @@ module.exports = {
   deleteServiceAgreement,
   downloadServiceAgreementPDF,
 };
-
