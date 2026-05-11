@@ -1,4 +1,4 @@
-const mysql = require('mysql2/promise');
+﻿const mysql = require('mysql2/promise');
 require('dotenv').config();
 
 const pool = mysql.createPool({
@@ -8,7 +8,7 @@ const pool = mysql.createPool({
   database: process.env.DB_NAME || 'dekodeit_docs',
   waitForConnections: true,
   connectionLimit: 10,
-  queueLimit: 50,          // cap queued requests — prevents memory exhaustion under load
+  queueLimit: 50,          // cap queued requests - prevents memory exhaustion under load
   connectTimeout: 10000,   // 10s connection timeout
   enableKeepAlive: true,
   keepAliveInitialDelay: 30000,

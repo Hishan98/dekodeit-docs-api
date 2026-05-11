@@ -1,4 +1,4 @@
-const pool = require("../config/database");
+﻿const pool = require("../config/database");
 const Joi = require("joi");
 
 const customerSchema = Joi.object({
@@ -85,7 +85,7 @@ const getCustomers = async (req, res) => {
 
     const params = [];
     if (status === 'all') {
-      // no filter — return everything
+      // no filter - return everything
     } else if (filterStatus) {
       query += ' WHERE c.status = ?';
       params.push(filterStatus);
@@ -161,7 +161,7 @@ const getCustomerById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // No status filter — detail view works for any status so archived
+    // No status filter - detail view works for any status so archived
     // customers still display correctly inside linked documents
     const [[customer]] = await pool.execute(
       `SELECT c.*, u.name as created_by_name
@@ -387,7 +387,7 @@ const getLinkedRecords = async (req, res) => {
   }
 };
 
-// Archive a customer (soft delete) — linked records are untouched because the
+// Archive a customer (soft delete) - linked records are untouched because the
 // customer row remains in the database.  Use PATCH /customers/:id/status to
 // move between active / inactive / archived at any time.
 const deleteCustomer = async (req, res) => {

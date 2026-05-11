@@ -8,6 +8,9 @@ const uploadDirs = {
   designDocuments: path.join(__dirname, '../../uploads/design-documents'),
   pdfs: path.join(__dirname, '../../uploads/pdfs'),
   purchaseOrders: path.join(__dirname, '../../uploads/purchase-orders'),
+  proposals: path.join(__dirname, '../../uploads/proposals'),
+  serviceAgreements: path.join(__dirname, '../../uploads/service-agreements'),
+  paymentProofs: path.join(__dirname, '../../uploads/payment-proofs'),
 };
 
 Object.values(uploadDirs).forEach(dir => {
@@ -99,10 +102,95 @@ const uploadPurchaseOrder = multer({
   limits: { fileSize: 10 * 1024 * 1024 }
 });
 
+// Storage configuration for uploaded proposal documents (PDF, docx, doc)
+const proposalFileStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDirs.proposals);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, `proposal-${uniqueSuffix}${path.extname(file.originalname)}`);
+  }
+});
+
+// File filter for proposal uploads (PDF and Word only)
+const proposalFileFilter = (req, file, cb) => {
+  const allowedExts = ['.pdf', '.docx', '.doc'];
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (allowedExts.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only PDF and Word documents (.pdf, .docx, .doc) are allowed'), false);
+  }
+};
+
+const uploadProposalFile = multer({
+  storage: proposalFileStorage,
+  fileFilter: proposalFileFilter,
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+});
+
+// Storage configuration for uploaded service agreement documents (PDF, docx, doc)
+const serviceAgreementFileStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDirs.serviceAgreements);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, `service-agreement-${uniqueSuffix}${path.extname(file.originalname)}`);
+  }
+});
+
+const serviceAgreementFileFilter = (req, file, cb) => {
+  const allowedExts = ['.pdf', '.docx', '.doc'];
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (allowedExts.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only PDF and Word documents (.pdf, .docx, .doc) are allowed'), false);
+  }
+};
+
+const uploadServiceAgreementFile = multer({
+  storage: serviceAgreementFileStorage,
+  fileFilter: serviceAgreementFileFilter,
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+});
+
+// Storage configuration for payment proof / bank slip uploads
+const paymentProofStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, uploadDirs.paymentProofs);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, `proof-${uniqueSuffix}${path.extname(file.originalname)}`);
+  }
+});
+
+const paymentProofFilter = (req, file, cb) => {
+  const allowedExts = ['.pdf', '.jpg', '.jpeg', '.png', '.webp'];
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (allowedExts.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only PDF and image files (JPG, PNG, WEBP) are allowed'), false);
+  }
+};
+
+const uploadPaymentProof = multer({
+  storage: paymentProofStorage,
+  fileFilter: paymentProofFilter,
+  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+});
+
 module.exports = {
   uploadTemplate,
   uploadDesignDocument,
   uploadPurchaseOrder,
+  uploadProposalFile,
+  uploadServiceAgreementFile,
+  uploadPaymentProof,
   uploadDirs,
 };
 

@@ -1,4 +1,4 @@
-const pool = require("../config/database");
+﻿const pool = require("../config/database");
 const { generateInvoiceNumber } = require("./numberingService");
 const { generatePDF, replaceTemplateVariables } = require("./pdfService");
 const path = require("path");
@@ -26,7 +26,7 @@ async function processRecurringBills() {
         "SELECT id FROM invoice_templates ORDER BY id ASC LIMIT 1"
       );
       if (!firstTemplate) {
-        console.error("No invoice templates found — cannot process recurring bills");
+        console.error("No invoice templates found - cannot process recurring bills");
         return { processed: 0, generated: 0, invoices: [] };
       }
       defaultTemplateId = firstTemplate.id;
@@ -58,7 +58,7 @@ async function processRecurringBills() {
         );
 
         if (!template) {
-          console.error(`Template ${templateId} not found — skipping recurring bill ${bill.id}`);
+          console.error(`Template ${templateId} not found - skipping recurring bill ${bill.id}`);
           continue;
         }
 

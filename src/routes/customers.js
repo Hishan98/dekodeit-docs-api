@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const router = express.Router();
 const customerController = require('../controllers/customerController');
 const authenticate = require('../middleware/auth');
@@ -20,7 +20,7 @@ router.get('/:id', customerController.getCustomerById);
 router.post('/', roleCheck(['admin']), customerController.createCustomer);
 router.put('/:id', roleCheck(['admin']), customerController.updateCustomer);
 router.patch('/:id/status', roleCheck(['admin']), customerController.updateCustomerStatus);
-// DELETE archives the customer (soft delete — row is kept, status → archived)
+// DELETE archives the customer (soft delete - row is kept, status → archived)
 router.delete('/:id', roleCheck(['admin']), customerController.deleteCustomer);
 
 module.exports = router;

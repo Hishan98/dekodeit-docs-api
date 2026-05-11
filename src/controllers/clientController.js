@@ -1,4 +1,4 @@
-const pool = require('../config/database');
+﻿const pool = require('../config/database');
 const Joi = require('joi');
 
 const clientSchema = Joi.object({
@@ -7,7 +7,7 @@ const clientSchema = Joi.object({
   address:      Joi.string().allow('', null),
   vat_id:       Joi.string().allow('', null),
   notes:        Joi.string().allow('', null),
-  // Optional primary contact — supplied together with the client on create/update
+  // Optional primary contact - supplied together with the client on create/update
   contact_name:      Joi.string().allow('', null),
   contact_job_title: Joi.string().allow('', null),
   contact_email:     Joi.string().email().allow('', null),
@@ -19,7 +19,8 @@ const contactSchema = Joi.object({
   job_title:  Joi.string().allow('', null),
   email:      Joi.string().email().allow('', null),
   phone:      Joi.string().allow('', null),
-  is_primary: Joi.boolean().default(false),
+  is_primary: Joi.boolean().truthy(1).falsy(0).default(false),
+  notes:      Joi.string().allow('', null),
 });
 
 // ---------------------------------------------------------------------------
@@ -280,7 +281,7 @@ const updateClientStatus = async (req, res) => {
 };
 
 // ---------------------------------------------------------------------------
-// DELETE /api/clients/:id  — archives the client (soft delete)
+// DELETE /api/clients/:id  - archives the client (soft delete)
 // ---------------------------------------------------------------------------
 const deleteClient = async (req, res) => {
   try {
@@ -385,9 +386,9 @@ const addContact = async (req, res) => {
     }
 
     const [result] = await pool.execute(
-      `INSERT INTO client_contacts (client_id, name, job_title, email, phone, is_primary)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-      [id, value.name, value.job_title || null, value.email || null, value.phone || null, value.is_primary],
+      `INSERT INTO client_contacts (client_id, name, job_title, email, phone, is_primary, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [id, value.name, value.job_title || null, value.email || null, value.phone || null, value.is_primary, value.notes || null],
     );
 
     const [[contact]] = await pool.execute(
@@ -423,9 +424,9 @@ const updateContact = async (req, res) => {
 
     const [result] = await pool.execute(
       `UPDATE client_contacts
-       SET name = ?, job_title = ?, email = ?, phone = ?, is_primary = ?
+       SET name = ?, job_title = ?, email = ?, phone = ?, is_primary = ?, notes = ?
        WHERE id = ? AND client_id = ?`,
-      [value.name, value.job_title || null, value.email || null, value.phone || null, value.is_primary, contactId, id],
+      [value.name, value.job_title || null, value.email || null, value.phone || null, value.is_primary, value.notes || null, contactId, id],
     );
 
     if (result.affectedRows === 0) {

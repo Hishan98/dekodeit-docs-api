@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Purchase Order Request</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; }
+        .header { color: #ea580c; }
+        .footer { margin-top: 30px; }
+    </style>
+</head>
+<body>
+    <h2 class="header">Dear {{customerName}},</h2>
+    <p>We are pleased to inform you that the proposal and service agreement for project <strong>{{projectName}}</strong> have been accepted and signed.</p>
+    <p>To proceed, kindly issue a <strong>Purchase Order</strong> referencing proposal <strong>{{proposalNumber}}</strong> and send it to us at your earliest convenience.</p>
+    <p>Once we receive the Purchase Order, we will generate your invoice and begin the project.</p>
+    <div class="footer">
+        <p>Best regards,<br><strong>Dekode IT Team</strong></p>
+    </div>
+</body>
+</html>

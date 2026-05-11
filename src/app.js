@@ -1,4 +1,4 @@
-const express = require("express");
+﻿const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const compression = require("compression");
@@ -94,7 +94,7 @@ const speedLimiter = slowDown({
 app.use("/api/", limiter);
 app.use("/api/", speedLimiter);
 
-// Serve uploaded files — cross-origin explicitly allowed so the frontend
+// Serve uploaded files - cross-origin explicitly allowed so the frontend
 // (different port) can load avatars and other assets as <img> tags.
 app.use("/uploads", (_req, res, next) => {
   res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
@@ -124,6 +124,8 @@ app.use("/api/services", require("./routes/services"));
 app.use("/api/recurring-bills", require("./routes/recurringBills"));
 app.use("/api/design-documents", require("./routes/designDocuments"));
 app.use("/api/service-agreements", require("./routes/serviceAgreements"));
+app.use("/api/notifications",    require("./routes/notifications"));
+app.use("/api/email-templates",  require("./routes/emailTemplates"));
 
 // Health check
 app.get("/health", (req, res) => {
@@ -154,7 +156,7 @@ app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`API Documentation: http://localhost:${PORT}/api-docs`);
 
-  // Verify SMTP on startup — logs a warning if misconfigured, never crashes the server
+  // Verify SMTP on startup - logs a warning if misconfigured, never crashes the server
   const { verifyConnection } = require("./services/emailService");
   verifyConnection();
 });

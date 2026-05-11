@@ -1,4 +1,4 @@
-const bcrypt = require("bcryptjs");
+﻿const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const pool = require("../config/database");
 const Joi = require("joi");
@@ -384,7 +384,7 @@ const verifyOTP = async (req, res) => {
 
     let otpRecord = otps[0];
 
-    // Check expiration — mysql2 returns TIMESTAMP columns as JS Date objects
+    // Check expiration - mysql2 returns TIMESTAMP columns as JS Date objects
     // when using the promise pool, so a direct comparison is safe.
     const expiresAt = otpRecord.expires_at instanceof Date
       ? otpRecord.expires_at
@@ -410,7 +410,7 @@ const verifyOTP = async (req, res) => {
         .json({ error: "Maximum attempts exceeded. Please request a new OTP" });
     }
 
-    // Verify OTP — atomically increment attempts only when OTP is wrong,
+    // Verify OTP - atomically increment attempts only when OTP is wrong,
     // and invalidate in the same statement if max is reached.
     if (otpRecord.otp !== otp) {
       // Single atomic UPDATE: increment attempts and invalidate if at limit

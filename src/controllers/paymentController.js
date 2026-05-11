@@ -1,5 +1,7 @@
 const pool = require('../config/database');
 const Joi = require('joi');
+const fs = require('fs');
+const path = require('path');
 
 const paymentSchema = Joi.object({
   invoice_id: Joi.number().integer().allow(null),
@@ -19,13 +21,18 @@ const getPayments = async (req, res) => {
   try {
     const { invoice_id, proposal_id, project_id } = req.query;
     let query = `
-      SELECT p.*, 
-       i.invoice_number, pr.proposal_number, proj.name as project_name
-       FROM payments p
-       LEFT JOIN invoices i ON p.invoice_id = i.id
-       LEFT JOIN proposals pr ON p.proposal_id = pr.id
-       LEFT JOIN projects proj ON p.project_id = proj.id
-       WHERE 1=1
+      SELECT p.*,
+        i.invoice_number, i.project_id AS invoice_project_id,
+        ps.stage_name,
+        pr.proposal_number,
+        proj.name AS project_name,
+        CASE WHEN p.recipient_type = 'company' THEN 'income' ELSE 'outgoing' END AS direction
+      FROM payments p
+      LEFT JOIN invoices i ON p.invoice_id = i.id
+      LEFT JOIN payment_stages ps ON i.payment_stage_id = ps.id
+      LEFT JOIN proposals pr ON p.proposal_id = pr.id
+      LEFT JOIN projects proj ON p.project_id = proj.id
+      WHERE 1=1
     `;
     const params = [];
 
@@ -38,8 +45,9 @@ const getPayments = async (req, res) => {
       params.push(proposal_id);
     }
     if (project_id) {
-      query += ' AND p.project_id = ?';
-      params.push(project_id);
+      // Include direct project payments AND invoice-linked payments for this project
+      query += ' AND (p.project_id = ? OR (p.invoice_id IS NOT NULL AND i.project_id = ?))';
+      params.push(project_id, project_id);
     }
 
     query += ' ORDER BY p.payment_date DESC';
@@ -102,7 +110,7 @@ const createPayment = async (req, res) => {
     // Update invoice status if payment is for invoice
     if (value.invoice_id) {
       const [invoices] = await pool.execute(
-        'SELECT final_amount FROM invoices WHERE id = ?',
+        'SELECT final_amount, payment_stage_id FROM invoices WHERE id = ?',
         [value.invoice_id]
       );
 
@@ -114,29 +122,21 @@ const createPayment = async (req, res) => {
 
         const totalPaid = parseFloat(paymentSum[0].total);
         const finalAmount = parseFloat(invoices[0].final_amount);
+        const invoicePaid = totalPaid >= finalAmount;
 
-        if (totalPaid >= finalAmount) {
+        await pool.execute(
+          'UPDATE invoices SET status = ? WHERE id = ?',
+          [invoicePaid ? 'paid' : 'sent', value.invoice_id]
+        );
+
+        // If invoice is now fully paid, mark the linked payment stage as paid
+        if (invoicePaid && invoices[0].payment_stage_id) {
           await pool.execute(
-            'UPDATE invoices SET status = "paid" WHERE id = ?',
-            [value.invoice_id]
-          );
-        } else {
-          await pool.execute(
-            'UPDATE invoices SET status = "sent" WHERE id = ?',
-            [value.invoice_id]
+            "UPDATE payment_stages SET status='paid' WHERE id=?",
+            [invoices[0].payment_stage_id]
           );
         }
       }
-    }
-
-    // Update payment stage status if payment is for proposal
-    if (value.proposal_id && value.payment_type === 'advance') {
-      await pool.execute(
-        `UPDATE payment_stages
-         SET status = 'paid'
-         WHERE proposal_id = ? AND (stage_name LIKE '%kickoff%' OR stage_name LIKE '%advance%')`,
-        [value.proposal_id]
-      );
     }
 
     const [payments] = await pool.execute(
@@ -258,6 +258,38 @@ const getProjectPayments = async (req, res) => {
   }
 };
 
+const uploadPaymentProofFile = async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const [[pmt]] = await pool.execute('SELECT id, proof_path FROM payments WHERE id=?', [id]);
+    if (!pmt) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    // Delete old proof file if it exists
+    if (pmt.proof_path) {
+      const oldPath = path.join(__dirname, '../../', pmt.proof_path.replace(/^\//, ''));
+      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+    }
+
+    const proofPath = `/uploads/payment-proofs/${req.file.filename}`;
+    await pool.execute(
+      'UPDATE payments SET proof_path=?, proof_original_name=? WHERE id=?',
+      [proofPath, req.file.originalname, id]
+    );
+
+    const [[updated]] = await pool.execute('SELECT * FROM payments WHERE id=?', [id]);
+    res.json({ payment: updated, message: 'Proof uploaded successfully' });
+  } catch (error) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    console.error('Upload payment proof error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 module.exports = {
   getPayments,
   getPaymentById,
@@ -265,5 +297,6 @@ module.exports = {
   updatePayment,
   deletePayment,
   getProjectPayments,
+  uploadPaymentProofFile,
 };
 

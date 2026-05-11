@@ -1,4 +1,4 @@
-const pool = require('../config/database');
+﻿const pool = require('../config/database');
 const Joi = require('joi');
 const { saveTemplateFile, loadTemplateFile, deleteTemplateFile } = require('../services/templateFileService');
 
@@ -118,7 +118,7 @@ const getProposalTemplateById = async (req, res) => {
  *             $ref: '#/components/schemas/TemplateInput'
  *     responses:
  *       201:
- *         description: Template created — html_content saved to file
+ *         description: Template created - html_content saved to file
  *       400:
  *         description: Validation error
  */
@@ -179,7 +179,7 @@ const createProposalTemplate = async (req, res) => {
  *             $ref: '#/components/schemas/TemplateInput'
  *     responses:
  *       200:
- *         description: Template updated — file overwritten
+ *         description: Template updated - file overwritten
  *       404:
  *         description: Template not found
  */
@@ -498,7 +498,7 @@ const deleteInvoiceTemplate = async (req, res) => {
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Design Document Templates  (already file-based — unchanged)
+// Design Document Templates  (already file-based - unchanged)
 // ═══════════════════════════════════════════════════════════════════════════
 
 const getDesignDocumentTemplates = async (req, res) => {
@@ -889,7 +889,7 @@ const deleteServiceAgreementTemplate = async (req, res) => {
  *           type: string
  *         html_content:
  *           type: string
- *           description: Full HTML with {{variable}} placeholders — saved to disk, not stored in DB
+ *           description: Full HTML with {{variable}} placeholders - saved to disk, not stored in DB
  *         variables:
  *           type: string
  *           description: JSON array of available variable names

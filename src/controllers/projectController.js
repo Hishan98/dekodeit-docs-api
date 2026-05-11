@@ -1,7 +1,8 @@
-const pool = require("../config/database");
+﻿const pool = require("../config/database");
 const Joi = require("joi");
 const path = require("path");
 const fs = require("fs");
+const { sendPORequestEmail, sendPOReceivedEmail } = require("../services/emailService");
 
 const projectSchema = Joi.object({
   name: Joi.string().required(),
@@ -23,6 +24,7 @@ const projectSchema = Joi.object({
       "closed"
     )
     .default("draft"),
+  currency: Joi.string().default('LKR'),
   total_amount: Joi.number().min(0).default(0),
   status: Joi.string()
     .valid("active", "completed", "cancelled")
@@ -133,7 +135,7 @@ const getProjectById = async (req, res) => {
 
     // Get linked proposals with full details
     const [proposals] = await pool.execute(
-      `SELECT p.id, p.proposal_number, p.total_amount, p.currency, p.status, p.valid_until, p.subject, p.created_at, p.pdf_path
+      `SELECT p.id, p.proposal_number, p.total_amount, p.currency, p.status, p.valid_until, p.subject, p.created_at, p.pdf_path, p.source
        FROM proposals p
        WHERE p.project_id = ?
        ORDER BY p.created_at DESC`,
@@ -167,14 +169,38 @@ const getProjectById = async (req, res) => {
       [id]
     );
 
-    // Get payments
+    // Get payments - includes both direct project payments and invoice-linked payments
     const [payments] = await pool.execute(
-      `SELECT * FROM payments WHERE project_id = ? ORDER BY payment_date DESC`,
+      `SELECT p.*, i.invoice_number, ps.stage_name
+       FROM payments p
+       LEFT JOIN invoices i ON p.invoice_id = i.id
+       LEFT JOIN payment_stages ps ON i.payment_stage_id = ps.id
+       WHERE p.project_id = ? OR (p.invoice_id IS NOT NULL AND i.project_id = ?)
+       ORDER BY p.payment_date DESC`,
+      [id, id]
+    );
+
+    // Get payment stages through linked proposals, with invoice info and dynamic overdue status
+    const [paymentStages] = await pool.execute(
+      `SELECT
+         ps.id, ps.stage_name, ps.percentage, ps.amount, ps.due_date,
+         CASE
+           WHEN ps.status = 'paid' THEN 'paid'
+           WHEN ps.due_date IS NOT NULL AND ps.due_date < CURDATE() AND ps.status != 'paid' THEN 'overdue'
+           ELSE 'pending'
+         END AS status,
+         p.id AS proposal_id, p.proposal_number, p.currency,
+         i.id AS invoice_id, i.invoice_number, i.status AS invoice_status, i.final_amount AS invoice_amount
+       FROM payment_stages ps
+       JOIN proposals p ON p.id = ps.proposal_id
+       LEFT JOIN invoices i ON i.payment_stage_id = ps.id
+       WHERE p.project_id = ?
+       ORDER BY ps.id ASC`,
       [id]
     );
 
     // Calculate payment totals.
-    // broker_commission and developer_payment are outgoing costs — they must NOT
+    // broker_commission and developer_payment are outgoing costs - they must NOT
     // count toward the customer-paid total or reduce the project balance.
     const brokerPayments = payments
       .filter((p) => p.payment_type === 'broker_commission')
@@ -193,6 +219,7 @@ const getProjectById = async (req, res) => {
       service_agreements: serviceAgreements,
       design_documents: designDocuments,
       payments,
+      payment_stages: paymentStages,
       payment_summary: {
         total_amount: parseFloat(projects[0].total_amount),
         total_paid: totalPaid,
@@ -265,14 +292,15 @@ const createProject = async (req, res) => {
     }
 
     const [result] = await pool.execute(
-      `INSERT INTO projects (name, description, client_id, service_id, phase, total_amount, status, start_date, end_date, has_recurring_billing, free_support_period_months, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO projects (name, description, client_id, service_id, phase, currency, total_amount, status, start_date, end_date, has_recurring_billing, free_support_period_months, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         value.name,
         value.description || null,
         value.client_id,
         value.service_id || null,
         value.phase,
+        value.currency,
         value.total_amount,
         value.status,
         value.start_date || null,
@@ -362,9 +390,10 @@ const updateProject = async (req, res) => {
     }
 
     await pool.execute(
-      `UPDATE projects 
+      `UPDATE projects
        SET name = ?, description = ?, client_id = ?, service_id = ?, phase = ?,
-       total_amount = ?, status = ?, start_date = ?, end_date = ?, has_recurring_billing = ?, free_support_period_months = ?
+       currency = ?, total_amount = ?, status = ?, start_date = ?, end_date = ?,
+       has_recurring_billing = ?, free_support_period_months = ?
        WHERE id = ?`,
       [
         value.name,
@@ -372,6 +401,7 @@ const updateProject = async (req, res) => {
         value.client_id,
         value.service_id || null,
         value.phase,
+        value.currency,
         value.total_amount,
         value.status,
         value.start_date || null,
@@ -556,7 +586,7 @@ const deleteProject = async (req, res) => {
 
     if (blocked.length > 0) {
       return res.status(409).json({
-        error: `Cannot delete project — it has linked ${blocked.join(", ")}. Remove or reassign them first.`,
+        error: `Cannot delete project - it has linked ${blocked.join(", ")}. Remove or reassign them first.`,
         blocked,
       });
     }
@@ -572,10 +602,23 @@ const deleteProject = async (req, res) => {
 const uploadPurchaseOrder = async (req, res) => {
   try {
     const { id } = req.params;
-    const [[project]] = await pool.execute("SELECT id FROM projects WHERE id = ?", [id]);
-    if (!project) return res.status(404).json({ error: "Project not found" });
 
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
+
+    const [[project]] = await pool.execute(
+      `SELECT proj.id, proj.name,
+       cc.name AS contact_name, cc.email AS contact_email,
+       cl.company_name AS client_name,
+       p.proposal_number
+       FROM projects proj
+       LEFT JOIN clients cl ON proj.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
+       LEFT JOIN proposals p ON p.project_id = proj.id AND p.status = 'accepted'
+       WHERE proj.id = ?
+       LIMIT 1`,
+      [id]
+    );
+    if (!project) return res.status(404).json({ error: "Project not found" });
 
     const filePath = `/uploads/purchase-orders/${req.file.filename}`;
 
@@ -585,6 +628,17 @@ const uploadPurchaseOrder = async (req, res) => {
     );
 
     const [[updated]] = await pool.execute("SELECT * FROM projects WHERE id = ?", [id]);
+
+    // Notify the customer that their PO was received - fire-and-forget
+    if (project.contact_email) {
+      sendPOReceivedEmail(
+        project.contact_email,
+        project.contact_name || project.client_name,
+        project.name,
+        project.proposal_number || 'N/A'
+      ).catch((err) => console.error('[Email] PO received email failed:', err.message));
+    }
+
     res.json({ project: updated, message: "Purchase order uploaded successfully" });
   } catch (error) {
     console.error("Upload purchase order error:", error);
@@ -618,13 +672,84 @@ const removePurchaseOrder = async (req, res) => {
   }
 };
 
+const getFinancialsSummary = async (req, res) => {
+  try {
+    const [rows] = await pool.execute(`
+      SELECT
+        proj.id, proj.name, proj.status, proj.phase,
+        c.company_name AS client_name,
+        COALESCE((
+          SELECT SUM(p.amount) FROM payments p
+          LEFT JOIN invoices i ON p.invoice_id = i.id
+          WHERE (p.project_id = proj.id OR i.project_id = proj.id)
+            AND p.recipient_type = 'company'
+        ), 0) AS total_in,
+        COALESCE((
+          SELECT SUM(p.amount) FROM payments p
+          LEFT JOIN invoices i ON p.invoice_id = i.id
+          WHERE (p.project_id = proj.id OR i.project_id = proj.id)
+            AND p.recipient_type != 'company'
+        ), 0) AS total_out,
+        COALESCE((
+          SELECT COUNT(p.id) FROM payments p
+          LEFT JOIN invoices i ON p.invoice_id = i.id
+          WHERE p.project_id = proj.id OR i.project_id = proj.id
+        ), 0) AS transaction_count
+      FROM projects proj
+      LEFT JOIN clients c ON c.id = proj.client_id
+      WHERE proj.status != 'cancelled'
+      ORDER BY proj.created_at DESC
+    `);
+    res.json({ projects: rows.map(r => ({ ...r, net: parseFloat(r.total_in) - parseFloat(r.total_out) })) });
+  } catch (error) {
+    console.error('Get financials summary error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+const sendPORequestEmailToCustomer = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [[project]] = await pool.execute(
+      `SELECT proj.*, cl.company_name AS client_name,
+       cc.name AS contact_name, cc.email AS contact_email,
+       p.proposal_number
+       FROM projects proj
+       LEFT JOIN clients cl ON proj.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
+       LEFT JOIN proposals p ON p.project_id = proj.id AND p.status = 'accepted'
+       WHERE proj.id = ?
+       LIMIT 1`,
+      [id]
+    );
+
+    if (!project) return res.status(404).json({ error: 'Project not found' });
+    if (!project.contact_email) return res.status(400).json({ error: 'No contact email' });
+
+    await sendPORequestEmail(
+      project.contact_email,
+      project.contact_name || project.client_name,
+      project.name,
+      project.proposal_number || 'N/A'
+    );
+
+    res.json({ message: 'PO request email sent successfully' });
+  } catch (error) {
+    console.error('Send PO request email error:', error);
+    res.status(500).json({ error: error.message || 'Failed to send email' });
+  }
+};
+
 module.exports = {
   getProjects,
   getProjectById,
+  getFinancialsSummary,
   createProject,
   updateProject,
   updateProjectPhase,
   deleteProject,
   uploadPurchaseOrder,
+  sendPORequestEmailToCustomer,
   removePurchaseOrder,
 };

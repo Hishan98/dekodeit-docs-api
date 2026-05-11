@@ -1,8 +1,10 @@
-const pool = require('../config/database');
+﻿const pool = require('../config/database');
 const Joi = require('joi');
+const fs = require('fs');
 const { generateServiceAgreementNumber } = require('../services/numberingService');
 const { generatePDF, replaceTemplateVariables } = require('../services/pdfService');
 const { loadTemplateFile } = require('../services/templateFileService');
+const { sendServiceAgreementEmail, sendServiceAgreementSignedEmail } = require('../services/emailService');
 const path = require('path');
 const { PDF_DIR } = require('../config/paths');
 
@@ -14,45 +16,13 @@ const serviceAgreementSchema = Joi.object({
   notes: Joi.string().allow('', null),
 });
 
-/**
- * @swagger
- * /api/service-agreements:
- *   get:
- *     summary: Get all service agreements
- *     description: Retrieve a list of all service agreements with project and customer information
- *     tags: [Service Agreements]
- *     security:
- *       - bearerAuth: []
- *     responses:
- *       200:
- *         description: List of service agreements
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 agreements:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       id:
- *                         type: integer
- *                       agreement_number:
- *                         type: string
- *                         example: "S250101"
- *                       project_id:
- *                         type: integer
- *                       project_name:
- *                         type: string
- *                       customer_name:
- *                         type: string
- *                       status:
- *                         type: string
- *                         enum: ["draft","sent","revision_requested","resubmitted","signed","rejected"]
- *       500:
- *         description: Internal server error
- */
+const uploadServiceAgreementSchema = Joi.object({
+  project_id: Joi.number().integer().required(),
+  subject:    Joi.string().allow('', null),
+  status:     Joi.string().valid('draft', 'sent', 'revision_requested', 'resubmitted', 'signed', 'rejected').default('draft'),
+  notes:      Joi.string().allow('', null),
+});
+
 const getServiceAgreements = async (req, res) => {
   try {
     const [agreements] = await pool.execute(
@@ -71,37 +41,6 @@ const getServiceAgreements = async (req, res) => {
   }
 };
 
-/**
- * @swagger
- * /api/service-agreements/{id}:
- *   get:
- *     summary: Get service agreement by ID
- *     description: Retrieve a specific service agreement by its ID
- *     tags: [Service Agreements]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: integer
- *         description: Service agreement ID
- *     responses:
- *       200:
- *         description: Service agreement details
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 agreement:
- *                   type: object
- *       404:
- *         description: Service agreement not found
- *       500:
- *         description: Internal server error
- */
 const getServiceAgreementById = async (req, res) => {
   try {
     const { id } = req.params;
@@ -131,45 +70,6 @@ const getServiceAgreementById = async (req, res) => {
   }
 };
 
-/**
- * @swagger
- * /api/service-agreements:
- *   post:
- *     summary: Create a new service agreement
- *     description: >
- *       Creates a service agreement by merging project/customer data into the selected
- *       template (loaded from its HTML file) and generating a PDF immediately.
- *       The html_content is never stored in the database.
- *     tags: [Service Agreements]
- *     security:
- *       - bearerAuth: []
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - project_id
- *               - template_id
- *             properties:
- *               project_id:
- *                 type: integer
- *               template_id:
- *                 type: integer
- *               subject:
- *                 type: string
- *               status:
- *                 type: string
- *                 enum: ["draft","sent","revision_requested","resubmitted","signed","rejected"]
- *               notes:
- *                 type: string
- *     responses:
- *       201:
- *         description: Service agreement created — PDF generated immediately
- *       400:
- *         description: Validation error
- */
 const createServiceAgreement = async (req, res) => {
   try {
     const { error, value } = serviceAgreementSchema.validate(req.body);
@@ -206,7 +106,6 @@ const createServiceAgreement = async (req, res) => {
       'contact.name': project.contact_name || '',
       'contact.email': project.contact_email || '',
       'contact.phone': project.contact_phone || '',
-      // Legacy aliases for existing templates
       'customer.name': project.contact_name || project.client_name || '',
       'customer.email': project.contact_email || '',
       'customer.phone': project.contact_phone || '',
@@ -216,7 +115,6 @@ const createServiceAgreement = async (req, res) => {
       'date': new Date().toLocaleDateString(),
     };
 
-    // Load template from file and merge variables
     const rawHtml = await loadTemplateFile(template.file_path);
     const htmlContent = replaceTemplateVariables(rawHtml, variables);
 
@@ -255,68 +153,35 @@ const createServiceAgreement = async (req, res) => {
   }
 };
 
-/**
- * @swagger
- * /api/service-agreements/{id}:
- *   put:
- *     summary: Update a service agreement
- *     description: >
- *       Updates a service agreement and regenerates the PDF from the template file.
- *       The html_content is never stored in the database.
- *     tags: [Service Agreements]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: integer
- *         description: Service agreement ID
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - project_id
- *               - template_id
- *             properties:
- *               project_id:
- *                 type: integer
- *               template_id:
- *                 type: integer
- *               subject:
- *                 type: string
- *               status:
- *                 type: string
- *                 enum: ["draft","sent","revision_requested","resubmitted","signed","rejected"]
- *               notes:
- *                 type: string
- *     responses:
- *       200:
- *         description: Service agreement updated — PDF regenerated
- *       400:
- *         description: Validation error
- *       404:
- *         description: Service agreement or related resource not found
- *       500:
- *         description: Internal server error
- */
 const updateServiceAgreement = async (req, res) => {
   try {
     const { id } = req.params;
-    const { error, value } = serviceAgreementSchema.validate(req.body);
-    if (error) {
-      return res.status(400).json({ error: error.details[0].message });
-    }
 
     const [existing] = await pool.execute(
       'SELECT * FROM service_agreements WHERE id = ?',
       [id]
     );
     if (existing.length === 0) return res.status(404).json({ error: 'Service agreement not found' });
+
+    // Uploaded SAs: update metadata only, skip template/PDF regeneration
+    if (existing[0].source === 'upload') {
+      const { error, value } = uploadServiceAgreementSchema.validate(req.body);
+      if (error) return res.status(400).json({ error: error.details[0].message });
+
+      await pool.execute(
+        'UPDATE service_agreements SET project_id=?, subject=?, status=?, notes=? WHERE id=?',
+        [value.project_id, value.subject || null, value.status, value.notes || null, id]
+      );
+
+      const [[agr]] = await pool.execute('SELECT * FROM service_agreements WHERE id=?', [id]);
+      return res.json({ agreement: agr });
+    }
+
+    // Template-based SA: validate full schema and regenerate PDF
+    const { error, value } = serviceAgreementSchema.validate(req.body);
+    if (error) {
+      return res.status(400).json({ error: error.details[0].message });
+    }
 
     const [[template]] = await pool.execute(
       'SELECT id, file_path FROM service_agreement_templates WHERE id = ?',
@@ -345,7 +210,6 @@ const updateServiceAgreement = async (req, res) => {
       'contact.name': project.contact_name || '',
       'contact.email': project.contact_email || '',
       'contact.phone': project.contact_phone || '',
-      // Legacy aliases for existing templates
       'customer.name': project.contact_name || project.client_name || '',
       'customer.email': project.contact_email || '',
       'customer.phone': project.contact_phone || '',
@@ -388,15 +252,86 @@ const updateServiceAgreement = async (req, res) => {
   }
 };
 
-/**
- * @swagger
- * /api/service-agreements/{id}:
- *   delete:
- *     summary: Delete a service agreement
- *     tags: [Service Agreements]
- *     security:
- *       - bearerAuth: []
- */
+// ---------------------------------------------------------------------------
+// POST /api/service-agreements/upload
+// ---------------------------------------------------------------------------
+const uploadServiceAgreement = async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const { error, value } = uploadServiceAgreementSchema.validate(req.body);
+    if (error) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: error.details[0].message });
+    }
+
+    const [proj] = await pool.execute('SELECT id FROM projects WHERE id = ?', [value.project_id]);
+    if (proj.length === 0) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(404).json({ error: 'Project not found' });
+    }
+
+    const agreementNumber = await generateServiceAgreementNumber();
+    const filePath = `/uploads/service-agreements/${req.file.filename}`;
+
+    const [result] = await pool.execute(
+      `INSERT INTO service_agreements (agreement_number, project_id, template_id, subject, status, notes, source, pdf_path, created_by)
+       VALUES (?, ?, NULL, ?, ?, ?, 'upload', ?, ?)`,
+      [agreementNumber, value.project_id, value.subject || null, value.status, value.notes || null, filePath, req.user.id]
+    );
+
+    const [[agr]] = await pool.execute('SELECT * FROM service_agreements WHERE id = ?', [result.insertId]);
+    res.status(201).json({ agreement: agr });
+  } catch (error) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    console.error('Upload service agreement error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+// ---------------------------------------------------------------------------
+// POST /api/service-agreements/:id/replace-file
+// ---------------------------------------------------------------------------
+const replaceServiceAgreementFile = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const [[agr]] = await pool.execute(
+      'SELECT id, source, pdf_path FROM service_agreements WHERE id = ?',
+      [id]
+    );
+
+    if (!agr) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(404).json({ error: 'Service agreement not found' });
+    }
+
+    if (agr.pdf_path && agr.pdf_path.startsWith('/uploads/service-agreements/')) {
+      const oldAbsPath = path.join(__dirname, '../../', agr.pdf_path.replace(/^\//, ''));
+      if (fs.existsSync(oldAbsPath)) fs.unlinkSync(oldAbsPath);
+    }
+
+    const newPath = `/uploads/service-agreements/${req.file.filename}`;
+    await pool.execute(
+      'UPDATE service_agreements SET pdf_path = ?, source = ? WHERE id = ?',
+      [newPath, 'upload', id]
+    );
+
+    const [[updated]] = await pool.execute('SELECT * FROM service_agreements WHERE id = ?', [id]);
+    res.json({ agreement: updated, message: 'File replaced successfully' });
+  } catch (error) {
+    if (req.file) fs.unlink(req.file.path, () => {});
+    console.error('Replace service agreement file error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
 const deleteServiceAgreement = async (req, res) => {
   try {
     const { id } = req.params;
@@ -411,8 +346,11 @@ const deleteServiceAgreement = async (req, res) => {
     }
 
     if (agreements[0].pdf_path) {
-      const fs = require('fs').promises;
-      await fs.unlink(agreements[0].pdf_path).catch(() => {});
+      // Template PDFs stored as absolute paths; uploaded files as /uploads/... relative URLs
+      const filePath = agreements[0].pdf_path.startsWith('/')
+        ? path.join(__dirname, '../../', agreements[0].pdf_path.replace(/^\//, ''))
+        : agreements[0].pdf_path;
+      await fs.promises.unlink(filePath).catch(() => {});
     }
 
     await pool.execute('DELETE FROM service_agreements WHERE id = ?', [id]);
@@ -424,15 +362,6 @@ const deleteServiceAgreement = async (req, res) => {
   }
 };
 
-/**
- * @swagger
- * /api/service-agreements/{id}/pdf:
- *   get:
- *     summary: Download service agreement PDF
- *     tags: [Service Agreements]
- *     security:
- *       - bearerAuth: []
- */
 const downloadServiceAgreementPDF = async (req, res) => {
   try {
     const { id } = req.params;
@@ -452,90 +381,113 @@ const downloadServiceAgreementPDF = async (req, res) => {
       return res.status(404).json({ error: 'PDF not generated yet' });
     }
 
-    const fs = require('fs').promises;
+    // Resolve relative URL paths (uploaded files) to absolute filesystem paths
+    const absPath = agreement.pdf_path.startsWith('/')
+      ? path.join(__dirname, '../../', agreement.pdf_path.replace(/^\//, ''))
+      : agreement.pdf_path;
+
     try {
-      await fs.access(agreement.pdf_path);
+      await fs.promises.access(absPath);
     } catch {
       return res.status(404).json({ error: 'PDF file not found on server' });
     }
 
-    res.download(agreement.pdf_path, `service-agreement-${agreement.agreement_number}.pdf`);
+    res.download(absPath, `service-agreement-${agreement.agreement_number}.pdf`);
   } catch (error) {
     console.error('Download service agreement PDF error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-/**
- * @swagger
- * /api/service-agreements/{id}/status:
- *   put:
- *     summary: Update service agreement status only
- *     description: Updates only the status field of a service agreement without requiring other fields
- *     tags: [Service Agreements]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: path
- *         name: id
- *         required: true
- *         schema:
- *           type: integer
- *         description: Service agreement ID
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required:
- *               - status
- *             properties:
- *               status:
- *                 type: string
- *                 enum: ["draft","sent","revision_requested","resubmitted","signed","rejected"]
- *                 example: "signed"
- *     responses:
- *       200:
- *         description: Status updated successfully
- *       400:
- *         description: Invalid status value
- *       404:
- *         description: Service agreement not found
- *       500:
- *         description: Internal server error
- */
 const updateServiceAgreementStatus = async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body;
 
     const validStatuses = ['draft', 'sent', 'revision_requested', 'resubmitted', 'signed', 'rejected'];
-
     if (!validStatuses.includes(status)) {
       return res.status(400).json({ error: `Invalid status. Valid values: ${validStatuses.join(', ')}` });
     }
 
-    const [existing] = await pool.execute(
-      'SELECT id FROM service_agreements WHERE id = ?',
+    const [[existing]] = await pool.execute(
+      `SELECT sa.id, sa.status AS current_status, sa.agreement_number,
+       p.name AS project_name,
+       cc.name AS contact_name, cc.email AS contact_email,
+       cl.company_name AS client_name
+       FROM service_agreements sa
+       LEFT JOIN projects p ON sa.project_id = p.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
+       WHERE sa.id = ?`,
       [id]
     );
-    if (existing.length === 0) return res.status(404).json({ error: 'Service agreement not found' });
+    if (!existing) return res.status(404).json({ error: 'Service agreement not found' });
 
-    await pool.execute(
-      'UPDATE service_agreements SET status = ? WHERE id = ?',
-      [status, id]
-    );
+    await pool.execute('UPDATE service_agreements SET status = ? WHERE id = ?', [status, id]);
 
-    const [agreements] = await pool.execute(
-      'SELECT * FROM service_agreements WHERE id = ?',
-      [id]
-    );
+    const [[agreement]] = await pool.execute('SELECT * FROM service_agreements WHERE id = ?', [id]);
 
-    res.json({ agreement: agreements[0] });
+    // Send signed confirmation - fire-and-forget (don't block the response)
+    if (status === 'signed' && existing.current_status !== 'signed' && existing.contact_email) {
+      sendServiceAgreementSignedEmail(
+        existing.contact_email,
+        existing.contact_name || existing.client_name,
+        existing.agreement_number,
+        existing.project_name
+      ).catch((err) => console.error('[Email] SA signed email failed:', err.message));
+    }
+
+    res.json({ agreement });
   } catch (error) {
     console.error('Update service agreement status error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  }
+};
+
+const sendServiceAgreementEmailToCustomer = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const [[sa]] = await pool.execute(
+      `SELECT sa.*, cl.company_name AS client_name,
+       cc.name AS contact_name, cc.email AS contact_email
+       FROM service_agreements sa
+       LEFT JOIN projects p ON sa.project_id = p.id
+       LEFT JOIN clients cl ON p.client_id = cl.id
+       LEFT JOIN client_contacts cc ON cc.client_id = cl.id AND cc.is_primary = TRUE
+       WHERE sa.id = ?`,
+      [id]
+    );
+
+    if (!sa) return res.status(404).json({ error: 'Service agreement not found' });
+
+    if (!sa.pdf_path) {
+      return res.status(400).json({ error: 'PDF not generated yet. Please generate PDF first.' });
+    }
+
+    if (!sa.contact_email) {
+      return res.status(400).json({ error: 'Primary contact has no email address' });
+    }
+
+    // Resolve relative URL to absolute filesystem path for uploaded files
+    const absPath = sa.pdf_path.startsWith('/')
+      ? path.join(__dirname, '../../', sa.pdf_path.replace(/^\//, ''))
+      : sa.pdf_path;
+
+    await sendServiceAgreementEmail(
+      sa.contact_email,
+      sa.contact_name || sa.client_name,
+      sa.agreement_number,
+      absPath
+    );
+
+    const newStatus = sa.status === 'revision_requested' ? 'resubmitted' : 'sent';
+    await pool.execute('UPDATE service_agreements SET status = ? WHERE id = ?', [newStatus, id]);
+
+    res.json({ message: 'Service agreement email sent successfully' });
+  } catch (error) {
+    console.error('Send service agreement email error:', error);
+    res.status(500).json({ error: error.message || 'Failed to send email' });
   }
 };
 
@@ -543,8 +495,11 @@ module.exports = {
   getServiceAgreements,
   getServiceAgreementById,
   createServiceAgreement,
+  uploadServiceAgreement,
+  replaceServiceAgreementFile,
   updateServiceAgreement,
   updateServiceAgreementStatus,
   deleteServiceAgreement,
   downloadServiceAgreementPDF,
+  sendServiceAgreementEmailToCustomer,
 };

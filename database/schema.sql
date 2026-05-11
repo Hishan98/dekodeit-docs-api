@@ -1,6 +1,6 @@
--- =============================================================================
+﻿-- =============================================================================
 -- Dekode IT  |  Invoice & Proposal Management System
--- Database Schema  —  source of truth for fresh installs
+-- Database Schema  -  source of truth for fresh installs
 --
 -- Always reflects the current production table structure.
 -- For upgrading an existing database see: database/migrations.sql
@@ -61,8 +61,8 @@ INSERT IGNORE INTO services (id, name, description) VALUES
 (3, 'UI/UX Designs & Branding',   'User interface design and branding services'),
 (4, 'Social Media Marketing',     'Social media marketing and management'),
 (5, 'Small Scale IOT Development','Internet of Things development services'),
-(6, 'Support Agreement',          'Time-bounded support contracts — each renewal period creates a new project'),
-(7, 'Professional Services',      'Post-delivery engagements such as feature additions, audits, or migrations — each scope creates a new project');
+(6, 'Support Agreement',          'Time-bounded support contracts - each renewal period creates a new project'),
+(7, 'Professional Services',      'Post-delivery engagements such as feature additions, audits, or migrations - each scope creates a new project');
 
 -- -----------------------------------------------------------------------------
 -- Clients  (companies / organisations that Dekode IT works with)
@@ -174,6 +174,8 @@ CREATE TABLE IF NOT EXISTS projects (
                                    COMMENT 'Path to uploaded Purchase Order document',
     purchase_order_received_at DATETIME      DEFAULT NULL
                                    COMMENT 'Timestamp when PO was uploaded',
+    currency                   VARCHAR(10)   NOT NULL DEFAULT 'LKR'
+                                   COMMENT 'Billing currency inherited by invoices and proposals',
     created_by                 INT,
     created_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -189,7 +191,7 @@ CREATE TABLE IF NOT EXISTS projects (
 -- Proposals
 --
 -- client_id nullable for the same reason as projects.
--- html_content is no longer stored — the PDF (pdf_path) is the immutable artifact.
+-- html_content is no longer stored - the PDF (pdf_path) is the immutable artifact.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS proposals (
     id              INT          PRIMARY KEY AUTO_INCREMENT,
@@ -202,6 +204,8 @@ CREATE TABLE IF NOT EXISTS proposals (
     currency        VARCHAR(10)   DEFAULT 'LKR',
     valid_until     DATE,
     status          ENUM('draft','sent','revision_requested','resubmitted','accepted','declined','expired') DEFAULT 'draft',
+    source          ENUM('template','upload') NOT NULL DEFAULT 'template'
+                        COMMENT 'How the proposal document was created: template-generated or directly uploaded',
     pdf_path        VARCHAR(500),
     notes           TEXT,
     created_by      INT,
@@ -239,62 +243,67 @@ CREATE TABLE IF NOT EXISTS payment_stages (
 -- -----------------------------------------------------------------------------
 -- Invoices
 --
--- client_id nullable — same rationale as projects/proposals.
--- html_content is no longer stored — the PDF (pdf_path) is the immutable artifact.
+-- client_id nullable - same rationale as projects/proposals.
+-- html_content is no longer stored - the PDF (pdf_path) is the immutable artifact.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS invoices (
-    id              INT           PRIMARY KEY AUTO_INCREMENT,
-    invoice_number  VARCHAR(50)   UNIQUE NOT NULL COMMENT 'Format: D251101',
-    client_id       INT           NULL,
-    project_id      INT,
-    proposal_id     INT,
-    template_id     INT,
-    subject         VARCHAR(255),
-    total_amount    DECIMAL(15,2) NOT NULL,
-    currency        VARCHAR(10)   DEFAULT 'LKR',
-    tax_amount      DECIMAL(15,2) DEFAULT 0.00,
-    discount_amount DECIMAL(15,2) DEFAULT 0.00,
-    final_amount    DECIMAL(15,2) NOT NULL,
-    due_date        DATE,
-    status          ENUM('draft','sent','paid','overdue','cancelled') DEFAULT 'draft',
-    pdf_path        VARCHAR(500),
-    notes           TEXT,
-    created_by      INT,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (client_id)   REFERENCES clients(id)            ON DELETE SET NULL,
-    FOREIGN KEY (project_id)  REFERENCES projects(id)           ON DELETE SET NULL,
-    FOREIGN KEY (proposal_id) REFERENCES proposals(id)          ON DELETE SET NULL,
-    FOREIGN KEY (template_id) REFERENCES invoice_templates(id)  ON DELETE SET NULL,
-    FOREIGN KEY (created_by)  REFERENCES users(id)              ON DELETE SET NULL,
+    id               INT           PRIMARY KEY AUTO_INCREMENT,
+    invoice_number   VARCHAR(50)   UNIQUE NOT NULL COMMENT 'Format: D251101',
+    client_id        INT           NULL,
+    project_id       INT,
+    proposal_id      INT,
+    payment_stage_id INT           NULL COMMENT 'Links invoice to a specific proposal payment stage/milestone',
+    template_id      INT,
+    subject          VARCHAR(255),
+    total_amount     DECIMAL(15,2) NOT NULL,
+    currency         VARCHAR(10)   DEFAULT 'LKR',
+    tax_amount       DECIMAL(15,2) DEFAULT 0.00,
+    discount_amount  DECIMAL(15,2) DEFAULT 0.00,
+    final_amount     DECIMAL(15,2) NOT NULL,
+    due_date         DATE,
+    status           ENUM('draft','sent','paid','overdue','cancelled') DEFAULT 'draft',
+    pdf_path         VARCHAR(500),
+    notes            TEXT,
+    created_by       INT,
+    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    FOREIGN KEY (client_id)        REFERENCES clients(id)            ON DELETE SET NULL,
+    FOREIGN KEY (project_id)       REFERENCES projects(id)           ON DELETE SET NULL,
+    FOREIGN KEY (proposal_id)      REFERENCES proposals(id)          ON DELETE SET NULL,
+    FOREIGN KEY (payment_stage_id) REFERENCES payment_stages(id)     ON DELETE SET NULL,
+    FOREIGN KEY (template_id)      REFERENCES invoice_templates(id)  ON DELETE SET NULL,
+    FOREIGN KEY (created_by)       REFERENCES users(id)              ON DELETE SET NULL,
     INDEX idx_invoice_number  (invoice_number),
     INDEX idx_client          (client_id),
     INDEX idx_status          (status),
     INDEX idx_due_date        (due_date),
     INDEX idx_created_at      (created_at),
-    INDEX idx_status_created  (status, created_at)
+    INDEX idx_status_created  (status, created_at),
+    INDEX idx_payment_stage   (payment_stage_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- -----------------------------------------------------------------------------
 -- Payments
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS payments (
-    id               INT           PRIMARY KEY AUTO_INCREMENT,
-    invoice_id       INT,
-    proposal_id      INT,
-    project_id       INT,
-    payment_type     ENUM('advance','interim','final',
-                          'broker_commission','developer_payment','recurring') NOT NULL,
-    amount           DECIMAL(15,2) NOT NULL,
-    payment_date     DATE          NOT NULL,
-    payment_method   VARCHAR(100),
-    reference_number VARCHAR(255),
-    description      TEXT,
-    recipient_name   VARCHAR(255)  COMMENT 'For broker/developer payments',
-    recipient_type   ENUM('broker','developer','company') DEFAULT 'company',
-    created_by       INT,
-    created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    id                  INT           PRIMARY KEY AUTO_INCREMENT,
+    invoice_id          INT,
+    proposal_id         INT,
+    project_id          INT,
+    payment_type        ENUM('advance','interim','final',
+                             'broker_commission','developer_payment','recurring') NOT NULL,
+    amount              DECIMAL(15,2) NOT NULL,
+    payment_date        DATE          NOT NULL,
+    payment_method      VARCHAR(100),
+    reference_number    VARCHAR(255),
+    description         TEXT,
+    recipient_name      VARCHAR(255)  COMMENT 'For broker/developer payments',
+    recipient_type      ENUM('broker','developer','company') DEFAULT 'company',
+    proof_path          VARCHAR(500)  NULL COMMENT 'Relative path to uploaded bank slip evidence, e.g. /uploads/payment-proofs/proof-123.pdf',
+    proof_original_name VARCHAR(255)  NULL COMMENT 'Original filename of the uploaded bank slip',
+    created_by          INT,
+    created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (invoice_id)  REFERENCES invoices(id)  ON DELETE SET NULL,
     FOREIGN KEY (proposal_id) REFERENCES proposals(id) ON DELETE SET NULL,
     FOREIGN KEY (project_id)  REFERENCES projects(id)  ON DELETE SET NULL,
@@ -422,7 +431,7 @@ CREATE TABLE IF NOT EXISTS service_agreement_templates (
 
 -- -----------------------------------------------------------------------------
 -- Service Agreements
--- html_content is no longer stored — the PDF (pdf_path) is the immutable artifact.
+-- html_content is no longer stored - the PDF (pdf_path) is the immutable artifact.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS service_agreements (
     id               INT          PRIMARY KEY AUTO_INCREMENT,
@@ -432,6 +441,8 @@ CREATE TABLE IF NOT EXISTS service_agreements (
     subject          VARCHAR(255),
     pdf_path         VARCHAR(500),
     status           ENUM('draft','sent','revision_requested','resubmitted','signed','rejected') DEFAULT 'draft',
+    source           ENUM('template','upload') NOT NULL DEFAULT 'template'
+                         COMMENT 'How the agreement document was created: template-generated or directly uploaded',
     notes            TEXT,
     created_by       INT,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -444,6 +455,32 @@ CREATE TABLE IF NOT EXISTS service_agreements (
     INDEX idx_status           (status),
     INDEX idx_created_at       (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- =============================================================================
+-- Email Templates  (file-based - NOT stored in the database)
+-- =============================================================================
+-- HTML email bodies live on disk under:
+--   src/emailTemplates/<key>.html
+--
+-- They are managed via the Settings > Emails UI (GET/PUT /api/email-templates).
+-- Each file supports {{variable}} placeholders interpolated at send time by
+-- emailService.js.
+--
+-- Template inventory:
+--   proposal.html               - Sent when a proposal is emailed to the customer
+--   proposalAccepted.html       - Confirmation when a proposal is marked accepted
+--   invoice.html                - Sent when an invoice is emailed to the customer
+--   invoiceReminder.html        - Payment reminder for an outstanding invoice
+--   serviceAgreement.html       - Sent when a service agreement is emailed
+--   serviceAgreementSigned.html - Confirmation when an SA is marked signed
+--   purchaseOrderRequest.html   - PO request sent to the customer
+--   purchaseOrderReceived.html  - Confirmation that a PO has been received
+--   customerFollowup.html       - Project status follow-up to the customer
+--   otp.html                    - OTP code for password reset flows
+--
+-- No migration or schema change is required to add or edit templates.
+-- Editing via the UI rewrites the file in place without restarting the server.
+-- =============================================================================
 
 -- -----------------------------------------------------------------------------
 -- Numbering Sequences  (invoice, proposal, design-document, service-agreement)

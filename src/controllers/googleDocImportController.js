@@ -1,4 +1,4 @@
-const GDOC_ID_PATTERNS = [
+﻿const GDOC_ID_PATTERNS = [
   // /document/d/{id}/edit  or  /document/d/{id}/view  etc.
   /\/document\/d\/([a-zA-Z0-9_-]{25,})/,
   // docs.google.com/open?id={id}
@@ -23,7 +23,7 @@ function extractDocId(url) {
  * - Google's body/p margin resets that flatten all spacing
  * - Inline google-specific attributes
  *
- * Returns { bodyHtml, css } — ready to inject into GrapesJS.
+ * Returns { bodyHtml, css } - ready to inject into GrapesJS.
  */
 /** Convert pt to px: 1pt = 1.3333px */
 function ptToPx(pt) {
@@ -39,10 +39,10 @@ function cleanGoogleDocHtml(rawHtml) {
   const bodyMatch = rawHtml.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
   let body = bodyMatch ? bodyMatch[1] : rawHtml;
 
-  // 3. Remove @font-face — Google's CDN fonts 404 outside Docs
+  // 3. Remove @font-face - Google's CDN fonts 404 outside Docs
   css = css.replace(/@font-face\s*\{[^}]*\}/gi, "");
 
-  // 4. Strip body/html rules (including class variants like body.c13) — Google sets
+  // 4. Strip body/html rules (including class variants like body.c13) - Google sets
   //    margin:72pt (1-inch page margins) which causes layout offsets.
   //    We preserve this ourselves via the wrapper padding instead.
   css = css.replace(/(?:html|body)(?:\.\w+)?\s*\{[^}]*\}/gi, "");
@@ -94,7 +94,7 @@ function cleanGoogleDocHtml(rawHtml) {
   //     position:relative so the coordinates are relative to it, not the page.
   css = css.replace(
     /(\{[^}]*position\s*:\s*relative[^}]*\})/gi,
-    (m) => m // already relative — keep
+    (m) => m // already relative - keep
   );
 
   // 11. Wrap in a clean container that mimics the page dimensions Google uses
@@ -194,7 +194,7 @@ const importGoogleDoc = async (req, res) => {
   <style>
     * { box-sizing: border-box; }
 
-    /* Reset — override anything Google left behind */
+    /* Reset - override anything Google left behind */
     html, body {
       margin: 0 !important;
       padding: 0 !important;
@@ -202,7 +202,7 @@ const importGoogleDoc = async (req, res) => {
       overflow-x: hidden;
     }
 
-    /* Document wrapper — 816px matches Google Docs' letter-size page width.
+    /* Document wrapper - 816px matches Google Docs' letter-size page width.
        position:relative is critical: it makes this the reference frame for
        any position:absolute elements (e.g. cover page text boxes). */
     .gdoc-import {
@@ -217,7 +217,7 @@ const importGoogleDoc = async (req, res) => {
       overflow: hidden;
     }
 
-    /* Responsive images — covers large cover-page images */
+    /* Responsive images - covers large cover-page images */
     .gdoc-import img {
       max-width: 100% !important;
       height: auto !important;

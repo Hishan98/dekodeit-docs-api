@@ -1,4 +1,4 @@
-/**
+﻿/**
  * seed-template-files.js
  *
  * Creates the default HTML template files on disk and inserts the
@@ -7,7 +7,7 @@
  * Run AFTER schema.sql + seed.sql on a fresh database:
  *   node scripts/seed-template-files.js
  *
- * Safe to re-run — existing rows (matched by name) are skipped via
+ * Safe to re-run - existing rows (matched by name) are skipped via
  * INSERT IGNORE, and existing files are overwritten only if the DB row
  * was freshly inserted.
  */

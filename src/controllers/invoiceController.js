@@ -11,6 +11,7 @@ const invoiceSchema = Joi.object({
   client_id: Joi.number().integer().required(),
   project_id: Joi.number().integer().allow(null),
   proposal_id: Joi.number().integer().allow(null),
+  payment_stage_id: Joi.number().integer().allow(null),
   template_id: Joi.number().integer().required(),
   subject: Joi.string().allow('', null),
   total_amount: Joi.number().positive().required(),
@@ -151,11 +152,12 @@ const createInvoice = async (req, res) => {
     await conn.beginTransaction();
 
     const [result] = await conn.execute(
-      `INSERT INTO invoices (invoice_number, client_id, project_id, proposal_id, template_id, subject,
+      `INSERT INTO invoices (invoice_number, client_id, project_id, proposal_id, payment_stage_id, template_id, subject,
        total_amount, currency, tax_amount, discount_amount, final_amount, due_date, status, notes, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         invoiceNumber, value.client_id, value.project_id || null, value.proposal_id || null,
+        value.payment_stage_id || null,
         value.template_id, value.subject || null, value.total_amount, value.currency,
         value.tax_amount, value.discount_amount, finalAmount,
         value.due_date || null, value.status, value.notes || null, req.user.id,
@@ -252,17 +254,23 @@ const updateInvoice = async (req, res) => {
 
     await conn.execute(
       `UPDATE invoices
-       SET client_id = ?, project_id = ?, proposal_id = ?, template_id = ?, subject = ?,
+       SET client_id = ?, project_id = ?, proposal_id = ?, payment_stage_id = ?, template_id = ?, subject = ?,
            total_amount = ?, currency = ?, tax_amount = ?, discount_amount = ?, final_amount = ?,
            due_date = ?, status = ?, notes = ?
        WHERE id = ?`,
       [
         value.client_id, value.project_id || null, value.proposal_id || null,
+        value.payment_stage_id !== undefined ? (value.payment_stage_id || null) : existing.payment_stage_id,
         value.template_id, value.subject || null, value.total_amount, value.currency,
         value.tax_amount, value.discount_amount, finalAmount,
         value.due_date || null, value.status, value.notes || null, id,
       ]
     );
+
+    // If invoice is being marked paid, mark the linked payment stage paid too
+    if (value.status === 'paid' && existing.payment_stage_id) {
+      await pool.execute("UPDATE payment_stages SET status='paid' WHERE id=?", [existing.payment_stage_id]);
+    }
 
     await conn.execute('DELETE FROM invoice_line_items WHERE invoice_id = ?', [id]);
     if (value.line_items && value.line_items.length > 0) {

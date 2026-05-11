@@ -1,8 +1,8 @@
-const nodemailer = require("nodemailer");
+﻿const nodemailer = require("nodemailer");
 const fs = require("fs").promises;
 const path = require("path");
 
-// Singleton transporter — created once, reused across calls
+// Singleton transporter - created once, reused across calls
 let transporter = null;
 
 function getTransporter() {
@@ -30,7 +30,7 @@ function getTransporter() {
 }
 
 /**
- * Verify SMTP connection — call on startup to catch misconfig early.
+ * Verify SMTP connection - call on startup to catch misconfig early.
  */
 async function verifyConnection() {
   try {
@@ -38,7 +38,7 @@ async function verifyConnection() {
     console.log("SMTP connection verified successfully.");
   } catch (error) {
     console.error("SMTP connection failed:", error.message);
-    // Don't throw — app should still start, emails will fail gracefully
+    // Don't throw - app should still start, emails will fail gracefully
   }
 }
 
@@ -60,7 +60,7 @@ async function loadTemplate(templateName, variables = {}) {
     throw new Error(`Email template "${templateName}" not found at ${templatePath}`);
   }
 
-  // Replace all {{key}} occurrences — values are HTML-escaped to prevent injection
+  // Replace all {{key}} occurrences - values are HTML-escaped to prevent injection
   return html.replace(/\{\{(\w+)\}\}/g, (_, key) => {
     const val = variables[key] ?? '';
     return String(val)
@@ -96,7 +96,7 @@ async function sendEmail({ to, subject, templateName, variables = {}, attachment
 
   try {
     const info = await getTransporter().sendMail(mailOptions);
-    console.log(`[Email] Sent "${subject}" to ${to} — messageId: ${info.messageId}`);
+    console.log(`[Email] Sent "${subject}" to ${to} - messageId: ${info.messageId}`);
     return { success: true, messageId: info.messageId };
   } catch (error) {
     console.error(`[Email] Failed to send "${subject}" to ${to}:`, error.message);
@@ -120,6 +120,48 @@ async function sendProposalEmail(customerEmail, customerName, proposalNumber, pd
     attachments: [
       {
         filename: `proposal_${proposalNumber}.pdf`,
+        path: pdfPath,
+      },
+    ],
+  });
+}
+
+/**
+ * Send a Purchase Order request to the customer.
+ */
+async function sendPORequestEmail(customerEmail, customerName, projectName, proposalNumber) {
+  return sendEmail({
+    to: customerEmail,
+    subject: `Purchase Order Request - ${projectName} - Dekode IT`,
+    templateName: "purchaseOrderRequest",
+    variables: { customerName, projectName, proposalNumber },
+  });
+}
+
+/**
+ * Confirm to the customer that their Purchase Order has been received and an invoice will follow.
+ */
+async function sendPOReceivedEmail(customerEmail, customerName, projectName, proposalNumber) {
+  return sendEmail({
+    to: customerEmail,
+    subject: `Purchase Order Received - ${projectName} - Dekode IT`,
+    templateName: "purchaseOrderReceived",
+    variables: { customerName, projectName, proposalNumber },
+  });
+}
+
+/**
+ * Send a service agreement PDF to a customer.
+ */
+async function sendServiceAgreementEmail(customerEmail, customerName, agreementNumber, pdfPath) {
+  return sendEmail({
+    to: customerEmail,
+    subject: `Service Agreement ${agreementNumber} - Dekode IT`,
+    templateName: "serviceAgreement",
+    variables: { customerName, agreementNumber },
+    attachments: [
+      {
+        filename: `service_agreement_${agreementNumber}.pdf`,
         path: pdfPath,
       },
     ],
@@ -160,6 +202,30 @@ async function sendOTPEmail(userEmail, userName, otp) {
 }
 
 /**
+ * Send a confirmation to a customer when their proposal is marked as accepted.
+ */
+async function sendProposalAcceptedEmail(customerEmail, customerName, proposalNumber) {
+  return sendEmail({
+    to: customerEmail,
+    subject: `Proposal ${proposalNumber} Accepted - Dekode IT`,
+    templateName: "proposalAccepted",
+    variables: { customerName, proposalNumber },
+  });
+}
+
+/**
+ * Send a confirmation to a customer when their service agreement is marked as signed.
+ */
+async function sendServiceAgreementSignedEmail(customerEmail, customerName, agreementNumber, projectName) {
+  return sendEmail({
+    to: customerEmail,
+    subject: `Service Agreement ${agreementNumber} Signed - Dekode IT`,
+    templateName: "serviceAgreementSigned",
+    variables: { customerName, agreementNumber, projectName },
+  });
+}
+
+/**
  * Send a payment-due reminder for an outstanding invoice.
  */
 async function sendInvoiceReminderEmail(customerEmail, customerName, invoiceNumber, dueDate, amount) {
@@ -195,6 +261,11 @@ module.exports = {
   verifyConnection,
   sendEmail,
   sendProposalEmail,
+  sendProposalAcceptedEmail,
+  sendServiceAgreementEmail,
+  sendServiceAgreementSignedEmail,
+  sendPORequestEmail,
+  sendPOReceivedEmail,
   sendInvoiceEmail,
   sendOTPEmail,
   sendInvoiceReminderEmail,

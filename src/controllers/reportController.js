@@ -1,4 +1,4 @@
-const pool = require("../config/database");
+﻿const pool = require("../config/database");
 const ExcelJS = require("exceljs");
 
 const getRevenueReport = async (req, res) => {
@@ -137,7 +137,7 @@ const getAnalytics = async (req, res) => {
 
     const [revenueData] = await pool.execute(revenueQuery, params);
 
-    // Project phases distribution — filtered to the same date range as revenue
+    // Project phases distribution - filtered to the same date range as revenue
     let phaseQuery = "SELECT phase, COUNT(*) as count FROM projects WHERE 1=1";
     const phaseParams = [];
     if (start_date) { phaseQuery += " AND DATE(created_at) >= ?"; phaseParams.push(start_date); }
@@ -145,7 +145,7 @@ const getAnalytics = async (req, res) => {
     phaseQuery += " GROUP BY phase";
     const [phaseData] = await pool.execute(phaseQuery, phaseParams);
 
-    // Payment types distribution — filtered to the same date range
+    // Payment types distribution - filtered to the same date range
     let paymentTypeQuery = "SELECT payment_type, SUM(amount) as total FROM payments WHERE 1=1";
     const paymentParams = [];
     if (start_date) { paymentTypeQuery += " AND DATE(payment_date) >= ?"; paymentParams.push(start_date); }
@@ -153,7 +153,7 @@ const getAnalytics = async (req, res) => {
     paymentTypeQuery += " GROUP BY payment_type";
     const [paymentTypeData] = await pool.execute(paymentTypeQuery, paymentParams);
 
-    // Top clients — filtered to the same date range
+    // Top clients - filtered to the same date range
     let topClientsQuery = `
       SELECT cl.id, cl.company_name as name,
         COUNT(i.id) as invoice_count,

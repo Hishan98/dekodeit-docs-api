@@ -1,4 +1,4 @@
-/**
+﻿/**
  * migrate-templates.js
  *
  * One-time migration: moves html_content out of the three template tables
@@ -9,7 +9,7 @@
  * Usage:
  *   node scripts/migrate-templates.js
  *
- * Safe to re-run — rows that already have file_path set are skipped.
+ * Safe to re-run - rows that already have file_path set are skipped.
  */
 
 require('dotenv').config();
