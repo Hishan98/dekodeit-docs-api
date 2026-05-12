@@ -67,7 +67,7 @@ const login = async (req, res) => {
     // Generate JWT token
     const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET || "your-secret-key",
+      process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || "7d" }
     );
 
@@ -295,6 +295,12 @@ const forgotPassword = async (req, res) => {
     const otp = generateOTP();
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutes from now
 
+    // Purge expired records to prevent unbounded table growth
+    await pool.execute(
+      "DELETE FROM password_reset_otps WHERE expires_at < NOW()",
+      []
+    );
+
     // Invalidate any existing OTPs for this email
     await pool.execute(
       "UPDATE password_reset_otps SET verified = TRUE WHERE email = ? AND verified = FALSE",
@@ -440,7 +446,7 @@ const verifyOTP = async (req, res) => {
     // Generate temporary verification token (optional, for additional security)
     const verificationToken = jwt.sign(
       { email, otpId: otpRecord.id, type: "password_reset" },
-      process.env.JWT_SECRET || "your-secret-key",
+      process.env.JWT_SECRET,
       { expiresIn: "15m" }
     );
 
@@ -519,7 +525,7 @@ const resetPassword = async (req, res) => {
       try {
         const decoded = jwt.verify(
           token,
-          process.env.JWT_SECRET || "your-secret-key"
+          process.env.JWT_SECRET
         );
 
         // Verify token is for password reset

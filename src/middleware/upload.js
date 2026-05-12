@@ -127,7 +127,7 @@ const proposalFileFilter = (req, file, cb) => {
 const uploadProposalFile = multer({
   storage: proposalFileStorage,
   fileFilter: proposalFileFilter,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 // Storage configuration for uploaded service agreement documents (PDF, docx, doc)
@@ -154,7 +154,7 @@ const serviceAgreementFileFilter = (req, file, cb) => {
 const uploadServiceAgreementFile = multer({
   storage: serviceAgreementFileStorage,
   fileFilter: serviceAgreementFileFilter,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  limits: { fileSize: 10 * 1024 * 1024 },
 });
 
 // Storage configuration for payment proof / bank slip uploads

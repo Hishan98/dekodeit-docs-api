@@ -9,6 +9,14 @@ const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
 
+// Fail fast if required secrets are missing — never fall back to weak defaults
+const REQUIRED_ENV = ["JWT_SECRET", "DB_HOST", "DB_USER", "DB_PASSWORD", "DB_NAME"];
+const missingEnv = REQUIRED_ENV.filter((k) => !process.env[k]);
+if (missingEnv.length > 0) {
+  console.error(`FATAL: Missing required environment variables: ${missingEnv.join(", ")}`);
+  process.exit(1);
+}
+
 // Ensure uploads/avatars directory exists
 const avatarsDir = path.join(__dirname, "..", "uploads", "avatars");
 if (!fs.existsSync(avatarsDir)) {
@@ -108,8 +116,10 @@ app.use(
   })
 );
 
-// Swagger documentation
-app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+// Swagger documentation — only available outside production
+if (process.env.NODE_ENV !== "production") {
+  app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+}
 
 // Routes
 app.use("/api/auth", require("./routes/auth"));
@@ -127,9 +137,9 @@ app.use("/api/service-agreements", require("./routes/serviceAgreements"));
 app.use("/api/notifications",    require("./routes/notifications"));
 app.use("/api/email-templates",  require("./routes/emailTemplates"));
 
-// Health check
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+// Health check — public, minimal response (no server internals)
+app.get("/health", (_req, res) => {
+  res.json({ status: "ok" });
 });
 
 // 404 handler
@@ -137,12 +147,11 @@ app.use((req, res) => {
   res.status(404).json({ error: "Route not found" });
 });
 
-// Error handler
+// Error handler — never expose stack traces in responses
 app.use((err, req, res, next) => {
   console.error("Error:", err);
   res.status(err.status || 500).json({
     error: err.message || "Internal server error",
-    ...(process.env.NODE_ENV === "development" && { stack: err.stack }),
   });
 });
 

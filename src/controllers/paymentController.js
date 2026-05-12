@@ -81,13 +81,17 @@ const getPaymentById = async (req, res) => {
 };
 
 const createPayment = async (req, res) => {
+  const conn = await pool.getConnection();
   try {
     const { error, value } = paymentSchema.validate(req.body);
     if (error) {
+      conn.release();
       return res.status(400).json({ error: error.details[0].message });
     }
 
-    const [result] = await pool.execute(
+    await conn.beginTransaction();
+
+    const [result] = await conn.execute(
       `INSERT INTO payments (invoice_id, proposal_id, project_id, payment_type, amount,
        payment_date, payment_method, reference_number, description, recipient_name, recipient_type, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -107,47 +111,49 @@ const createPayment = async (req, res) => {
       ]
     );
 
-    // Update invoice status if payment is for invoice
+    // Update invoice status atomically within the same transaction
     if (value.invoice_id) {
-      const [invoices] = await pool.execute(
-        'SELECT final_amount, payment_stage_id FROM invoices WHERE id = ?',
+      const [[invoice]] = await conn.execute(
+        'SELECT final_amount, payment_stage_id FROM invoices WHERE id = ? FOR UPDATE',
         [value.invoice_id]
       );
 
-      if (invoices.length > 0) {
-        const [paymentSum] = await pool.execute(
-          'SELECT COALESCE(SUM(amount), 0) as total FROM payments WHERE invoice_id = ?',
+      if (invoice) {
+        const [[{ total }]] = await conn.execute(
+          'SELECT COALESCE(SUM(amount), 0) AS total FROM payments WHERE invoice_id = ?',
           [value.invoice_id]
         );
 
-        const totalPaid = parseFloat(paymentSum[0].total);
-        const finalAmount = parseFloat(invoices[0].final_amount);
-        const invoicePaid = totalPaid >= finalAmount;
+        const invoicePaid = parseFloat(total) >= parseFloat(invoice.final_amount);
 
-        await pool.execute(
+        await conn.execute(
           'UPDATE invoices SET status = ? WHERE id = ?',
           [invoicePaid ? 'paid' : 'sent', value.invoice_id]
         );
 
-        // If invoice is now fully paid, mark the linked payment stage as paid
-        if (invoicePaid && invoices[0].payment_stage_id) {
-          await pool.execute(
+        if (invoicePaid && invoice.payment_stage_id) {
+          await conn.execute(
             "UPDATE payment_stages SET status='paid' WHERE id=?",
-            [invoices[0].payment_stage_id]
+            [invoice.payment_stage_id]
           );
         }
       }
     }
 
-    const [payments] = await pool.execute(
+    await conn.commit();
+
+    const [[payment]] = await conn.execute(
       'SELECT * FROM payments WHERE id = ?',
       [result.insertId]
     );
 
-    res.status(201).json({ payment: payments[0] });
+    res.status(201).json({ payment });
   } catch (error) {
+    await conn.rollback();
     console.error('Create payment error:', error);
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    conn.release();
   }
 };
 

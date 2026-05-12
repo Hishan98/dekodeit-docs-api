@@ -48,17 +48,15 @@ CREATE INDEX IF NOT EXISTS idx_payments_project_type    ON payments  (project_id
 
 
 -- -----------------------------------------------------------------------------
--- [2025-xx]  Customer lifecycle status (soft delete)
--- Replaces hard DELETE with an ENUM status column.
---   active   = normal, appears in all dropdowns
---   inactive = temporarily hidden from dropdowns
---   archived = permanently retired, data preserved for historical documents
+-- [2025-xx]  Client lifecycle status (soft delete)  -- SUPERSEDED
+-- The `customers` table was renamed to `clients` before this migration was
+-- applied to any live database.  schema.sql already includes the status column
+-- on the `clients` table.  These statements are kept for history only.
 -- -----------------------------------------------------------------------------
-ALTER TABLE customers
-    ADD COLUMN IF NOT EXISTS status
-        ENUM('active', 'inactive', 'archived') NOT NULL DEFAULT 'active';
-
-CREATE INDEX IF NOT EXISTS idx_customers_status ON customers (status);
+-- ALTER TABLE clients
+--     ADD COLUMN IF NOT EXISTS status
+--         ENUM('active', 'inactive', 'archived') NOT NULL DEFAULT 'active';
+-- CREATE INDEX IF NOT EXISTS idx_clients_status ON clients (status);
 
 
 -- -----------------------------------------------------------------------------

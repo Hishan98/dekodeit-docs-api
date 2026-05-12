@@ -1,5 +1,13 @@
 const fs   = require("fs").promises;
 const path = require("path");
+const Joi  = require("joi");
+
+const sectionsSchema = Joi.object({
+  subject:  Joi.string().max(500).allow("").default(""),
+  greeting: Joi.string().max(500).allow("").default(""),
+  body:     Joi.string().max(10000).allow("").default(""),
+  closing:  Joi.string().max(1000).allow("").default(""),
+});
 
 const TEMPLATES_DIR = path.join(__dirname, "..", "emailTemplates");
 
@@ -117,9 +125,20 @@ const EMAIL_WRAPPER = `<!DOCTYPE html>
 </body>
 </html>`;
 
+function escapeHtml(str) {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function nl2p(text) {
   if (!text || !text.trim()) return "";
-  return text
+  // Escape first, then restore {{variable}} placeholders (they are safe — emailService substitutes them server-side)
+  const escaped = escapeHtml(text).replace(/\{\{(\w+)\}\}/g, (_, k) => `{{${k}}}`);
+  return escaped
     .split(/\n{2,}/)
     .map((para) => `<p>${para.replace(/\n/g, "<br>")}</p>`)
     .join("\n    ");
@@ -137,7 +156,7 @@ function assembleSectionHtml(key, sections) {
   } else if (key === "otp") {
     if (body.trim()) parts.push(nl2p(body));
     parts.push('<div class="otp-box"><p class="otp-code">{{otp}}</p></div>');
-    if (cta_text.trim()) parts.push(`<p class="note">${cta_text.replace(/\n/g, "<br>")}</p>`);
+    if (cta_text.trim()) parts.push(`<p class="note">${escapeHtml(cta_text).replace(/\n/g, "<br>")}</p>`);
   } else {
     if (body.trim()) parts.push(nl2p(body));
     if (cta_text.trim()) parts.push(`<div class="cta"><a href="#">${cta_text}</a></div>`);
@@ -199,13 +218,11 @@ const updateTemplate = async (req, res) => {
     return res.status(400).json({ error: "sections object is required" });
   }
 
+  const { error: valErr, value: clean } = sectionsSchema.validate(sections, { stripUnknown: true });
+  if (valErr) return res.status(400).json({ error: valErr.details[0].message });
+
   const meta = TEMPLATE_META.find((t) => t.key === key);
-  const clean = {
-    subject:  String(sections.subject  ?? meta.subject ?? ""),
-    greeting: String(sections.greeting ?? ""),
-    body:     String(sections.body     ?? ""),
-    closing:  String(sections.closing  ?? ""),
-  };
+  if (!clean.subject) clean.subject = meta.subject;
 
   try {
     const html = assembleSectionHtml(key, clean);

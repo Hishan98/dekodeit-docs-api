@@ -10,7 +10,7 @@ router.use(authenticate);
  * @swagger
  * tags:
  *   name: Email Templates
- *   description: Manage HTML email notification templates stored on disk under src/emailTemplates/
+ *   description: Manage email notification templates. Content is stored as structured sections (subject, greeting, body, closing) in .json files; the server assembles and writes the final .html used for sending.
  */
 
 /**
@@ -57,7 +57,7 @@ router.get("/", ctrl.listTemplates);
  * @swagger
  * /api/email-templates/{key}:
  *   get:
- *     summary: Get a single template - metadata plus raw HTML body
+ *     summary: Get a single template - metadata plus editable sections
  *     tags: [Email Templates]
  *     security:
  *       - bearerAuth: []
@@ -78,10 +78,10 @@ router.get("/", ctrl.listTemplates);
  *             - purchaseOrderReceived
  *             - customerFollowup
  *             - otp
- *         description: Template identifier matching the .html filename
+ *         description: Template identifier (matches the .json/.html filename without extension)
  *     responses:
  *       200:
- *         description: Template metadata plus raw HTML
+ *         description: Template metadata plus editable sections (falls back to hardcoded defaults if never saved)
  *         content:
  *           application/json:
  *             schema:
@@ -93,16 +93,16 @@ router.get("/", ctrl.listTemplates);
  *                 variables: { type: array, items: { type: string } }
  *                 sections:
  *                   type: object
- *                   description: Editable content sections (greeting, body, cta_text, closing)
+ *                   description: Editable content sections (subject, greeting, body, closing)
  *                   properties:
+ *                     subject:  { type: string }
  *                     greeting: { type: string }
- *                     body: { type: string }
- *                     cta_text: { type: string }
- *                     closing: { type: string }
+ *                     body:     { type: string }
+ *                     closing:  { type: string }
  *       401:
  *         description: Unauthorized
  *       404:
- *         description: Template key not recognised or file missing from disk
+ *         description: Template key not recognised
  */
 router.get("/:key", ctrl.getTemplate);
 
@@ -110,7 +110,7 @@ router.get("/:key", ctrl.getTemplate);
  * @swagger
  * /api/email-templates/{key}:
  *   put:
- *     summary: Update a template's HTML body and save to disk (admin only)
+ *     summary: Update a template's sections, assemble HTML, and save to disk (admin only)
  *     tags: [Email Templates]
  *     security:
  *       - bearerAuth: []
@@ -134,16 +134,15 @@ router.get("/:key", ctrl.getTemplate);
  *                 type: object
  *                 description: Structured content sections. The server assembles the final HTML.
  *                 properties:
+ *                   subject:
+ *                     type: string
+ *                     example: "Invoice {{invoiceNumber}} - Dekode IT"
  *                   greeting:
  *                     type: string
  *                     example: "Dear {{customerName}},"
  *                   body:
  *                     type: string
  *                     example: "Please find attached invoice {{invoiceNumber}}."
- *                   cta_text:
- *                     type: string
- *                     description: Button label. Empty string = no button (or note text for OTP template).
- *                     example: "View Invoice"
  *                   closing:
  *                     type: string
  *                     example: "Best regards,\nDekode IT Team"
@@ -158,7 +157,7 @@ router.get("/:key", ctrl.getTemplate);
  *                 message: { type: string }
  *                 key:     { type: string }
  *       400:
- *         description: html field missing or empty
+ *         description: sections object missing or invalid
  *       401:
  *         description: Unauthorized
  *       403:

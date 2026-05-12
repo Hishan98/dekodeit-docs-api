@@ -11,7 +11,7 @@ const authenticate = async (req, res, next) => {
 
     const token = authHeader.substring(7);
     
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
     // Verify user still exists
     const [users] = await pool.execute(

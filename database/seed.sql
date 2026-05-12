@@ -12,10 +12,13 @@
 -- Run that script AFTER this file:
 --   node scripts/seed-template-files.js
 --
--- Email notification templates (proposal.html, invoice.html, otp.html, etc.)
--- are stored as flat HTML files under src/emailTemplates/ and are NOT seeded
--- here. They ship with the codebase and can be edited live via
--- Settings > Emails in the UI (PUT /api/email-templates/:key).
+-- Email notification templates are NOT seeded here. Each template is stored as
+-- two companion files under src/emailTemplates/:
+--   <key>.json  - editable sections (subject, greeting, body, closing)
+--   <key>.html  - full HTML assembled from sections, used for sending
+-- The .html files ship with the codebase. .json files are created on first save
+-- via Settings > Emails in the UI (PUT /api/email-templates/:key). If a .json
+-- file is absent the controller falls back to hardcoded defaults.
 --
 -- Demo projects cover every workflow stage so the UI can be tested end-to-end:
 --   Project 1  kickoff      - full workflow complete (PO received, invoice sent)
@@ -75,10 +78,8 @@ INSERT INTO services (id, name, description) VALUES
 
 -- -----------------------------------------------------------------------------
 -- Users
---   id 1: admin@dekodeit.com  - password: admin123  (demo only)
---   id 2: staff@dekodeit.com  - password: admin123  (demo only)
---   id 3: lasni@dekodeit.com  - own password set at creation
--- Change demo passwords before any real use.
+-- Demo accounts are seeded with bcrypt hashes only.
+-- Reset all passwords via the UI or CLI before going to production.
 -- -----------------------------------------------------------------------------
 INSERT INTO users (id, email, password, name, role) VALUES
 (1, 'admin@dekodeit.com', '$2b$10$8JkexIV9NAHFrOIZ5tPJH.bK2.fKIyUwPmW2WOT55IQA/OW7Rl9ii', 'Admin User', 'admin'),

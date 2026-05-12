@@ -459,27 +459,27 @@ CREATE TABLE IF NOT EXISTS service_agreements (
 -- =============================================================================
 -- Email Templates  (file-based - NOT stored in the database)
 -- =============================================================================
--- HTML email bodies live on disk under:
---   src/emailTemplates/<key>.html
+-- Each template is stored as two companion files under src/emailTemplates/:
+--   <key>.json  - editable sections: subject, greeting, body, closing
+--                 written by the Settings > Emails UI on save
+--   <key>.html  - full HTML assembled from sections by emailTemplateController
+--                 used by emailService.js for sending; regenerated on every save
 --
--- They are managed via the Settings > Emails UI (GET/PUT /api/email-templates).
--- Each file supports {{variable}} placeholders interpolated at send time by
--- emailService.js.
+-- Template inventory (key -> trigger):
+--   proposal               - Sent when a proposal is emailed to the customer
+--   proposalAccepted       - Confirmation when a proposal is marked accepted
+--   invoice                - Sent when an invoice is emailed to the customer
+--   invoiceReminder        - Payment reminder for an outstanding invoice
+--   serviceAgreement       - Sent when a service agreement is emailed
+--   serviceAgreementSigned - Confirmation when an SA is marked signed
+--   purchaseOrderRequest   - PO request sent to the customer
+--   purchaseOrderReceived  - Confirmation that a PO has been received
+--   customerFollowup       - Project status follow-up to the customer
+--   otp                    - OTP code for password reset flows
 --
--- Template inventory:
---   proposal.html               - Sent when a proposal is emailed to the customer
---   proposalAccepted.html       - Confirmation when a proposal is marked accepted
---   invoice.html                - Sent when an invoice is emailed to the customer
---   invoiceReminder.html        - Payment reminder for an outstanding invoice
---   serviceAgreement.html       - Sent when a service agreement is emailed
---   serviceAgreementSigned.html - Confirmation when an SA is marked signed
---   purchaseOrderRequest.html   - PO request sent to the customer
---   purchaseOrderReceived.html  - Confirmation that a PO has been received
---   customerFollowup.html       - Project status follow-up to the customer
---   otp.html                    - OTP code for password reset flows
---
--- No migration or schema change is required to add or edit templates.
--- Editing via the UI rewrites the file in place without restarting the server.
+-- .json files are created on first save. If missing, the controller returns
+-- hardcoded defaults from SECTION_DEFAULTS in emailTemplateController.js.
+-- No DB migration required to add or edit templates.
 -- =============================================================================
 
 -- -----------------------------------------------------------------------------
